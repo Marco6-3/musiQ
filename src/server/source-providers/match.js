@@ -96,6 +96,8 @@ function songMatchScore(target, candidate) {
   const candidateNameRaw = String(candidate?.name || candidate?.title || '');
   if (/(?:cover|翻唱|伴奏|片段|试听|抒情钢琴|加速|纯净|伤感|正式版)/i.test(candidateNameRaw)) score -= 14;
   if (/\blive\b|演唱会/i.test(candidateNameRaw) || /演唱会|live/i.test(String(candidate?.album || ''))) score -= 8;
+  const candidateDurationSeconds = normalizeDurationSeconds(candidate?.duration);
+  if (candidateDurationSeconds > 0 && candidateDurationSeconds < 30) score -= 32;
 
   // Prefer candidates that expose a real platform id/url id.
   if (candidate?.id || candidate?.url_id) score += 4;
@@ -129,16 +131,30 @@ function inferSearchTarget(keyword) {
   };
 }
 
+function inferSearchTargets(keyword) {
+  const parts = normalizeText(keyword).split(/\s+/).filter(Boolean);
+  const targets = [{ name: keyword, artist: '' }];
+  if (parts.length <= 1) return targets;
+
+  targets.push({
+    artist: parts.slice(0, -1).join(' '),
+    name: parts[parts.length - 1]
+  });
+  targets.push({
+    artist: parts[parts.length - 1],
+    name: parts.slice(0, -1).join(' ')
+  });
+
+  return targets;
+}
+
 function rankSearchResults(keyword, candidates = []) {
-  const inferred = inferSearchTarget(keyword);
-  const literal = { name: keyword, artist: '' };
+  const targets = inferSearchTargets(keyword);
   return [...candidates]
     .map((candidate, index) => {
-      const inferredScore = songMatchScore(inferred, candidate);
-      const literalScore = songMatchScore(literal, candidate);
       return {
         ...candidate,
-        _searchScore: Math.max(inferredScore, literalScore),
+        _searchScore: Math.max(...targets.map((target) => songMatchScore(target, candidate))),
         _searchOrder: index
       };
     })
@@ -180,6 +196,7 @@ module.exports = {
   songMatchScore,
   selectBestSongCandidate,
   inferSearchTarget,
+  inferSearchTargets,
   rankSearchResults,
   isLikelyPreviewUrl,
   hasPlayableLength

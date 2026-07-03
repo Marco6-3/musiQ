@@ -10,7 +10,7 @@ const test = require('node:test');
 
 const { createDataStore, generateToken, hashPassword, ensurePlaylist, insertPlaylistSong } = require('../src/server/database');
 const { createExpressApp } = require('../src/server/index');
-const { OfflineMusicCache } = require('../src/server/offline-cache');
+const { OfflineMusicCache, cacheKey } = require('../src/server/offline-cache');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'music-offline-test-'));
@@ -110,7 +110,7 @@ test('offline cache downloads playlist songs and deletes unreferenced files', as
         };
       }
     };
-    cache = new OfflineMusicCache({ db: store.db, dataDir, dispatcher });
+    cache = new OfflineMusicCache({ db: store.db, dataDir, dispatcher, minBytes: 1 });
     await cache.syncAll();
 
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-1'));
@@ -127,6 +127,82 @@ test('offline cache downloads playlist songs and deletes unreferenced files', as
     if (cache) cache.close();
     if (store) store.close();
     audioServer.server.close();
+    removeTempDir(dataDir);
+  }
+});
+
+test('offline cache rejects tiny audio files instead of caching ad snippets', async () => {
+  const dataDir = createTempDir();
+  const audioServer = await startAudioServer({ audio: Buffer.concat([Buffer.from('ID3'), Buffer.alloc(1024, 1)]) });
+  let store;
+  let cache;
+
+  try {
+    store = await createDataStore(dataDir);
+    const userId = insertUser(store.db);
+    const playlist = ensurePlaylist(store.db, userId, 'Tiny Audio');
+    insertPlaylistSong(store.db, playlist.id, {
+      id: 'tiny-song',
+      source: 'kuwo',
+      name: '刚好遇见你',
+      artist: '李玉刚',
+      album: '刚好遇见你'
+    });
+
+    cache = new OfflineMusicCache({
+      db: store.db,
+      dataDir,
+      dispatcher: {
+        async proxy(types, params) {
+          assert.equal(types, 'url');
+          assert.equal(params.name, '刚好遇见你');
+          assert.equal(params.artist, '李玉刚');
+          return { data: JSON.stringify({ url: audioServer.url, br: 999 }) };
+        }
+      }
+    });
+
+    await cache.syncAll();
+    const failed = await waitFor(() => {
+      const row = store.db.prepare('SELECT status, error FROM offline_tracks WHERE song_id = ?').get('tiny-song');
+      return row?.status === 'error' ? row : null;
+    });
+
+    assert.match(failed.error, /音频文件过小/);
+    assert.equal(cache.getPlayableTrack('kuwo', 'tiny-song'), null);
+  } finally {
+    if (cache) cache.close();
+    if (store) await store.close();
+    audioServer.server.close();
+    removeTempDir(dataDir);
+  }
+});
+
+test('offline cache ignores existing tiny downloaded files and marks them invalid', async () => {
+  const dataDir = createTempDir();
+  let store;
+  let cache;
+
+  try {
+    store = await createDataStore(dataDir);
+    cache = new OfflineMusicCache({ db: store.db, dataDir, dispatcher: { async proxy() { return null; } } });
+    const key = cacheKey('kuwo', 'bad-existing');
+    const filePath = path.join(cache.audioDir, `${key}.mp3`);
+    fs.writeFileSync(filePath, Buffer.concat([Buffer.from('ID3'), Buffer.alloc(1024, 1)]));
+
+    store.db.prepare(`
+      INSERT INTO offline_tracks
+        (cache_key, song_id, source, name, artist, status, file_path, content_type, br, size, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'downloaded', ?, 'audio/mpeg', 999, ?, strftime('%s', 'now'))
+    `).run(key, 'bad-existing', 'kuwo', 'Bad Existing', 'Artist', filePath, fs.statSync(filePath).size);
+
+    assert.equal(cache.getPlayableTrack('kuwo', 'bad-existing'), null);
+    const row = store.db.prepare('SELECT status, error FROM offline_tracks WHERE cache_key = ?').get(key);
+    assert.equal(row.status, 'error');
+    assert.match(row.error, /离线音频文件过小/);
+  } finally {
+    if (cache) cache.close();
+    if (store) await store.close();
     removeTempDir(dataDir);
   }
 });
@@ -152,6 +228,7 @@ test('music API returns local offline URL when the track is downloaded', async (
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy() {
           return { data: JSON.stringify({ url: audioServer.url, br: 999 }) };
@@ -415,6 +492,7 @@ test('server account playlists trigger offline download and are available after 
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy(types, params) {
           assert.equal(types, 'url');
@@ -525,6 +603,7 @@ test('music API returns and prewarms iPhone ALAC URL for offline FLAC lossless r
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy() {
           return { data: JSON.stringify({ url: audioServer.url, br: 999 }) };
@@ -626,6 +705,7 @@ test('music API skips offline FLAC for iPhone when compatible quality is request
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy() {
           return { data: JSON.stringify({ url: audioServer.url, br: 999 }) };
@@ -706,6 +786,7 @@ test('offline cache detects FLAC content when provider metadata is wrong', async
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy() {
           return { data: JSON.stringify({ url: audioServer.url, br: 811 }) };
@@ -751,6 +832,7 @@ test('offline cache preserves URL extension when content type is generic and for
     cache = new OfflineMusicCache({
       db: store.db,
       dataDir,
+      minBytes: 1,
       dispatcher: {
         async proxy() {
           return { data: JSON.stringify({ url: audioServer.url, br: 999 }) };

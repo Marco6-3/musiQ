@@ -11,6 +11,7 @@ const { MetingProvider } = require('../src/server/source-providers/meting');
 const { UnmExternalProvider } = require('../src/server/source-providers/unm-external');
 const { KuwoDirectProvider } = require('../src/server/source-providers/kuwo-direct');
 const { KugouDirectProvider } = require('../src/server/source-providers/kugou-direct');
+const { rankSearchResults } = require('../src/server/source-providers/match');
 const { checkSourceHealth, healthProbeForProvider } = require('../src/server/api-monitor');
 const config = require('../src/config');
 
@@ -266,6 +267,34 @@ SONGNAME=晴天 (Live)
 
     assert.deepEqual(calls, [{ platform: 'kuwo', keyword: '周杰伦 晴天', count: 1 }]);
     assert.deepEqual(health, { search: true, play: true });
+  });
+
+  it('search ranking supports title-artist queries and demotes short snippets', () => {
+    const ranked = rankSearchResults('刚好遇见你 李玉刚', [
+      {
+        id: '174972717',
+        name: '《刚好遇见你》李玉刚',
+        artist: '沐风之吻',
+        source: 'kuwo',
+        duration: 278000
+      },
+      {
+        id: '157379982',
+        name: '刚好遇见你 李玉刚',
+        artist: 'Ta-洞朱',
+        source: 'kuwo',
+        duration: 14000
+      },
+      {
+        id: '9950164',
+        name: '刚好遇见你',
+        artist: '李玉刚',
+        source: 'kuwo',
+        duration: 200000
+      }
+    ]);
+
+    assert.equal(ranked[0].id, '9950164');
   });
 });
 

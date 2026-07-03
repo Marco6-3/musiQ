@@ -6,17 +6,26 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const axios = require('axios');
+const { MIN_PLAYABLE_AUDIO_BYTES } = require('./source-providers/match');
 
 const DEFAULT_QUALITY = '999';
 const DOWNLOAD_CONCURRENCY = 2;
 
 class OfflineMusicCache {
-  constructor({ db, dataDir, dispatcher, quality = DEFAULT_QUALITY, concurrency = DOWNLOAD_CONCURRENCY } = {}) {
+  constructor({
+    db,
+    dataDir,
+    dispatcher,
+    quality = DEFAULT_QUALITY,
+    concurrency = DOWNLOAD_CONCURRENCY,
+    minBytes = MIN_PLAYABLE_AUDIO_BYTES
+  } = {}) {
     this.db = db;
     this.dataDir = dataDir;
     this.dispatcher = dispatcher;
     this.quality = String(quality || DEFAULT_QUALITY);
     this.concurrency = Math.max(1, Number(concurrency) || DOWNLOAD_CONCURRENCY);
+    this.minBytes = Math.max(1, Number(minBytes) || MIN_PLAYABLE_AUDIO_BYTES);
     this.audioDir = path.join(dataDir, 'offline-audio');
     this.queue = [];
     this.queued = new Set();
@@ -54,7 +63,7 @@ class OfflineMusicCache {
     for (const song of desired) {
       this._upsertPending(song);
       const track = this.getTrack(song.source, song.id);
-      if (track?.status === 'downloaded' && track.file_path && fs.existsSync(track.file_path)) {
+      if (this._isUsableDownloadedTrack(track)) {
         continue;
       }
       this.enqueue(song);
@@ -92,6 +101,7 @@ class OfflineMusicCache {
     if (!track || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
       return null;
     }
+    if (!this._isUsableDownloadedTrack(track)) return null;
     return track;
   }
 
@@ -133,6 +143,12 @@ class OfflineMusicCache {
       }
     });
 
+    const reportedLength = Number(response.headers['content-length'] || 0);
+    if (reportedLength > 0 && reportedLength < this.minBytes) {
+      response.data?.destroy?.();
+      throw new Error(`音频文件过小，疑似广告或试听片段 (${reportedLength} bytes)`);
+    }
+
     const reportedContentType = response.headers['content-type'] || audio.contentType || 'audio/mpeg';
     const ext = extensionFor(reportedContentType, audio.url);
     const finalPath = path.join(this.audioDir, `${song.cache_key}${ext}`);
@@ -146,6 +162,10 @@ class OfflineMusicCache {
     if (stat.size <= 0) {
       await fsp.rm(tempPath, { force: true });
       throw new Error('下载结果为空');
+    }
+    if (stat.size < this.minBytes) {
+      await fsp.rm(tempPath, { force: true });
+      throw new Error(`音频文件过小，疑似广告或试听片段 (${stat.size} bytes)`);
     }
 
     // Detect actual audio format from file header (magic bytes) instead of
@@ -187,7 +207,11 @@ class OfflineMusicCache {
     const result = await this.dispatcher.proxy('url', {
       source: song.source || 'netease',
       id: song.id,
-      br: this.quality
+      br: this.quality,
+      name: song.name || '',
+      artist: song.artist || '',
+      album: song.album || '',
+      pic_id: song.pic_id || ''
     });
     const parsed = parseProviderBody(result);
     return {
@@ -195,6 +219,19 @@ class OfflineMusicCache {
       br: parsed?.br || parsed?.data?.br || this.quality,
       contentType: result?.contentType
     };
+  }
+
+  _isUsableDownloadedTrack(track) {
+    if (!track || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
+      return false;
+    }
+    const size = Number(track.size || safeFileSize(track.file_path) || 0);
+    if (size >= this.minBytes) return true;
+
+    const error = new Error(`离线音频文件过小，疑似广告或试听片段 (${size} bytes)`);
+    this._markError(track.cache_key, error);
+    console.warn(`[offline-cache] invalid cached audio (${track.source}:${track.song_id}):`, error.message);
+    return false;
   }
 
   // Scan all downloaded tracks and fix content_type / br / file extension
@@ -430,9 +467,18 @@ function safeUrlPath(url) {
   }
 }
 
+function safeFileSize(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return 0;
+  }
+}
+
 module.exports = {
   OfflineMusicCache,
   offlineAudioUrl,
+  MIN_PLAYABLE_AUDIO_BYTES,
   cacheKey,
   extensionFor,
   parseProviderBody
