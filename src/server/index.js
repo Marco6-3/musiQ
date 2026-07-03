@@ -1560,7 +1560,13 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
     return { body, contentType: response.headers['content-type'] || 'application/json', source: null };
   })();
 
-  inflightRequests.set(cacheKey, fetchPromise.then((r) => r.body));
+  const inflightBodyPromise = fetchPromise.then((r) => r.body);
+  // The main request awaits `fetchPromise` below and handles failures there.
+  // The derived body promise is only for request de-duplication; without an
+  // attached rejection handler, a failed upstream fallback can surface as an
+  // unhandled rejection and crash Node even though the response path recovers.
+  inflightBodyPromise.catch(() => {});
+  inflightRequests.set(cacheKey, inflightBodyPromise);
 
   try {
     const result = await fetchPromise;
