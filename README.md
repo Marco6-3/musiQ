@@ -127,8 +127,16 @@ $env:MUSIC_CORS_ORIGIN="https://你的前端域名"
 - iOS 自动播放受浏览器限制，首次播放必须来自用户点按；如果 Safari 丢失用户手势，界面会提示再次点按播放。
 - 后台播放、锁屏信息和控制中心按钮受 iOS / Safari 版本和系统策略限制，代码只做 feature detection，不承诺所有设备一致可用。
 - 支付宝、微信、QQ、钉钉等 iOS 内置浏览器会被识别为不适合播放的宿主，页面可以浏览，但点击播放会被阻止并提示复制链接到 Safari。
-- 普通 Safari 不注册完整 Media Session action handlers；只有 HTTPS 主屏幕 PWA 会完整启用播放、暂停、上一首、下一首和 seekto handlers。
+- iPhone 普通 Safari 不注册完整 Media Session action handlers；只有 HTTPS 主屏幕 PWA 会完整启用播放、暂停、上一首、下一首和 seekto handlers。macOS 等桌面安全上下文会直接启用系统媒体键与 Media Session。
+- 系统媒体封面使用同源 `/media/artwork` 代理，经过音乐 CDN 白名单、图片类型/大小校验，并统一生成缓存的 512×512 JPEG，避免第三方 CDN、错误 MIME 或横图导致锁屏/灵动岛拒绝封面。
+- 页面隐藏时只降低不可见的进度 DOM 更新和视觉合成频率；音频解码、音质、下一首预取、Media Session 控制和播放故障恢复保持启用，不以增加切歌延迟换取省电。
 - 主屏幕 PWA 和 Service Worker 需要 HTTPS；`localhost` 仅适合桌面开发。
+
+### Agent 歌单助手
+
+Agent 助手支持口语化的单首/批量添加、明确歌手、当前歌单/已有歌单指代，以及查看歌单内容，例如“往通勤歌单里放一下周杰伦的晴天和七里香”。模型不可用时会回退到本地规则解析，音源匹配低于安全分数的结果不会误加到歌单。
+
+Agent 接口只接受有效登录 token。默认账号 `mingzhe` 不限次数，其他账号按北京时间每天最多 2 次；可通过服务端 `MUSIC_AGENT_UNLIMITED_USERS` 调整不限额用户名列表。限额在数据库事务内原子计数，不能通过前端修改用户名或 user ID 绕过。
 
 ## 验证音源
 

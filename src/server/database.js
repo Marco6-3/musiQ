@@ -451,7 +451,7 @@ function normalizeProcessText(value) {
 
 function readProcessInfo(pid) {
   if (process.platform === 'win32') return readWindowsProcessInfo(pid);
-  return readProcProcessInfo(pid);
+  return readProcProcessInfo(pid) || readPosixProcessInfo(pid);
 }
 
 function readWindowsProcessInfo(pid) {
@@ -499,6 +499,31 @@ function readProcProcessInfo(pid) {
       name = fs.readFileSync(path.join(procDir, 'comm'), 'utf8').trim();
     }
     return { name, executablePath, commandLine, startedAt: '' };
+  } catch {
+    return null;
+  }
+}
+
+function readPosixProcessInfo(pid) {
+  const args = ['-p', String(pid)];
+  const options = {
+    encoding: 'utf8',
+    timeout: 3_000
+  };
+
+  try {
+    const commandLine = childProcess.execFileSync('ps', [...args, '-o', 'command='], options).trim();
+    if (!commandLine) return null;
+
+    const name = childProcess.execFileSync('ps', [...args, '-o', 'comm='], options).trim();
+    const startedText = childProcess.execFileSync('ps', [...args, '-o', 'lstart='], options).trim();
+    const startedMs = Date.parse(startedText);
+    return {
+      name: name || path.basename(commandLine.split(/\s+/, 1)[0] || ''),
+      executablePath: '',
+      commandLine,
+      startedAt: Number.isFinite(startedMs) ? new Date(startedMs).toISOString() : ''
+    };
   } catch {
     return null;
   }
@@ -619,6 +644,14 @@ function initDb(db) {
       queue_json TEXT DEFAULT '[]',
       client_state_json TEXT DEFAULT '{}',
       updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_usage (
+      user_id INTEGER NOT NULL,
+      usage_date TEXT NOT NULL,
+      request_count INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+      PRIMARY KEY(user_id, usage_date)
     );
   `);
   const now = formatDateTime(new Date());

@@ -10,7 +10,7 @@
     };
     const runtime = window.__musiqRuntime || {};
     runtime.refresh?.();
-    const appVersion = runtime.appVersion || '2026.06.06.1';
+    const appVersion = runtime.appVersion || '2026.07.10.6';
     const isStandalone = Boolean(runtime.isStandalonePwa)
         || window.navigator.standalone === true
         || window.matchMedia('(display-mode: standalone)').matches;

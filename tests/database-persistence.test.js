@@ -181,19 +181,23 @@ test('createDataStore migrates existing users from a legacy data directory when 
   const targetDir = createTempDir();
   const legacyDir = createTempDir();
   let store;
-  const sourceDb = path.join('data', 'music.db');
+  let legacyStore;
 
   try {
-    fs.copyFileSync(sourceDb, path.join(legacyDir, 'music.db'));
-    fs.copyFileSync(path.join('data', 'token-secret'), path.join(legacyDir, 'token-secret'));
+    legacyStore = await createDataStore(legacyDir);
+    insertUser(legacyStore.db, 'legacy_migration_user');
+    legacyStore.close();
+    legacyStore = null;
+    fs.writeFileSync(path.join(legacyDir, 'token-secret'), 'legacy-test-token-secret');
     fs.writeFileSync(path.join(targetDir, 'music.db'), '');
 
     store = await createDataStore(targetDir, { migrateFromDataDir: legacyDir });
 
-    const row = store.db.prepare('SELECT COUNT(*) AS cnt FROM users').get();
-    assert.equal(row.cnt > 0, true);
+    const row = store.db.prepare('SELECT username FROM users WHERE username = ?').get('legacy_migration_user');
+    assert.equal(row.username, 'legacy_migration_user');
     assert.equal(fs.existsSync(path.join(targetDir, 'token-secret')), true);
   } finally {
+    if (legacyStore) legacyStore.close();
     if (store) store.close();
     removeTempDir(targetDir);
     removeTempDir(legacyDir);

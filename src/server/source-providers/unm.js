@@ -375,14 +375,12 @@ class UnmProvider extends BaseProvider {
   }
 
   _buildSyntheticSong({ id, keyword, sourceName, directUrl }) {
-    const [namePart, artistPart] = keyword.includes(' - ')
-      ? keyword.split(' - ', 2)
-      : keyword.split(/\s+/, 2);
-
     return {
       id,
-      name: namePart || keyword,
-      artist: artistPart || '',
+      // A direct URL response contains no trustworthy metadata. Preserve the
+      // complete query instead of guessing title/artist from token order.
+      name: String(keyword || '').trim(),
+      artist: '',
       source: sourceName,
       directUrl
     };

@@ -102,12 +102,16 @@ async function postForm(baseUrl, route, body) {
   };
 }
 
-function insertUser(db) {
+function insertUser(db, {
+  username = 'agent_user',
+  email = `${username}@example.test`,
+  password = 'CorrectPass123'
+} = {}) {
   db.prepare(`
     INSERT INTO users (username, email, password_hash, email_verified)
     VALUES (?, ?, ?, 1)
-  `).run('agent_user', 'agent@example.test', hashPassword('CorrectPass123'));
-  return db.prepare('SELECT id FROM users WHERE username = ?').get('agent_user').id;
+  `).run(username, email, hashPassword(password));
+  return db.prepare('SELECT id FROM users WHERE username = ?').get(username).id;
 }
 
 test('agent assistant adds resolved songs to a playlist', async () => {
@@ -209,7 +213,33 @@ test('heuristic plan can parse a simple Chinese add-to-playlist request', () => 
   assert.equal(plan.playlist_name, '通勤');
   assert.deepEqual(plan.songs, [
     { title: '晴天', artist: '周杰伦' },
-    { title: '七里香', artist: '' }
+    { title: '七里香', artist: '周杰伦' }
+  ]);
+});
+
+test('heuristic plan understands conversational batches and explicit artists', () => {
+  const plan = createHeuristicPlan('往我的通勤里放一下《晴天》（周杰伦）和《江南》（林俊杰）', {
+    playlists: [{ name: '通勤', song_count: 0 }]
+  });
+
+  assert.equal(plan.action, 'add_songs_to_playlist');
+  assert.equal(plan.playlist_name, '通勤');
+  assert.deepEqual(plan.songs, [
+    { title: '晴天', artist: '周杰伦' },
+    { title: '江南', artist: '林俊杰' }
+  ]);
+});
+
+test('heuristic plan understands destination-first colloquial requests', () => {
+  const plan = createHeuristicPlan('往通勤歌单里放一下周杰伦的晴天和七里香', {
+    playlists: [{ name: '通勤', song_count: 0 }]
+  });
+
+  assert.equal(plan.action, 'add_songs_to_playlist');
+  assert.equal(plan.playlist_name, '通勤');
+  assert.deepEqual(plan.songs, [
+    { title: '晴天', artist: '周杰伦' },
+    { title: '七里香', artist: '周杰伦' }
   ]);
 });
 
@@ -220,4 +250,60 @@ test('heuristic plan can parse a Chinese playlist query request', () => {
   assert.equal(plan.action, 'query_playlist_songs');
   assert.equal(plan.playlist_name, '外部导入歌单');
   assert.deepEqual(plan.songs, []);
+});
+
+test('regular users can call Agent twice per Beijing day', async () => {
+  let ctx;
+  try {
+    ctx = await startAgentApp({
+      agentModelClient: async () => ({ action: 'chat', reply: '好的', songs: [] })
+    });
+    const userId = insertUser(ctx.store.db, { username: 'limited_user' });
+    const token = generateToken(userId);
+    const request = () => postForm(ctx.baseUrl, '/php/agent_assistant.php', {
+      user_id: String(userId),
+      token,
+      message: '帮我整理一下歌单'
+    });
+
+    const first = await request();
+    const second = await request();
+    const third = await request();
+
+    assert.equal(first.status, 200);
+    assert.equal(first.body.agent_usage.remaining, 1);
+    assert.equal(second.status, 200);
+    assert.equal(second.body.agent_usage.remaining, 0);
+    assert.equal(third.status, 429);
+    assert.match(third.body.message, /2 次助手额度已用完/);
+    assert.equal(third.body.agent_usage.remaining, 0);
+    assert.equal(ctx.store.db.prepare('SELECT request_count FROM agent_usage WHERE user_id = ?').get(userId).request_count, 2);
+  } finally {
+    closeAgentApp(ctx);
+  }
+});
+
+test('mingzhe account has unlimited authenticated Agent usage', async () => {
+  let ctx;
+  try {
+    ctx = await startAgentApp({
+      agentModelClient: async () => ({ action: 'chat', reply: '好的', songs: [] })
+    });
+    const userId = insertUser(ctx.store.db, { username: 'mingzhe', password: '123456' });
+    const token = generateToken(userId);
+
+    for (let index = 0; index < 5; index += 1) {
+      const response = await postForm(ctx.baseUrl, '/php/agent_assistant.php', {
+        user_id: String(userId),
+        token,
+        message: `第 ${index + 1} 次助手请求`
+      });
+      assert.equal(response.status, 200);
+      assert.equal(response.body.agent_usage.unlimited, true);
+      assert.equal(response.body.agent_usage.limit, null);
+    }
+    assert.equal(ctx.store.db.prepare('SELECT COUNT(*) AS count FROM agent_usage WHERE user_id = ?').get(userId).count, 0);
+  } finally {
+    closeAgentApp(ctx);
+  }
 });

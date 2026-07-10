@@ -64,7 +64,14 @@ function checkIndex() {
   has(html, 'name="theme-color"', 'theme-color meta');
   has(html, 'window.__MUSIC_CONFIG__', 'runtime config hook');
   has(html, 'js/pwa-runtime.js', 'PWA runtime detection script');
+  has(html, 'js/media-session-artwork.js', 'Media Session artwork script');
   has(html, 'js/pwa.js', 'PWA script');
+
+  const sw = read('webroot/sw.js');
+  const versionedAssets = [...html.matchAll(/(?:href|src)="((?:css|js)\/[^"]+\?v=[^"]+)"/g)].map((match) => match[1]);
+  for (const asset of versionedAssets) {
+    has(sw, `./${asset}`, `service worker versioned asset ${asset}`);
+  }
 }
 
 function checkServiceWorker() {
@@ -76,7 +83,7 @@ function checkServiceWorker() {
   for (const handler of ["'install'", "'activate'", "'fetch'"]) {
     has(sw, `addEventListener(${handler}`, `service worker ${handler} handler`);
   }
-  for (const asset of ['/', 'index.html', 'offline.html', 'manifest.webmanifest', 'css/style.css', 'js/pwa-runtime.js', 'js/main.js', 'js/source-selector.js', 'js/pwa.js', 'public/music-default.png']) {
+  for (const asset of ['/', 'index.html', 'offline.html', 'manifest.webmanifest', 'css/style.css', 'js/pwa-runtime.js', 'js/media-session-artwork.js', 'js/main.js', 'js/source-selector.js', 'js/pwa.js', 'public/music-default.png']) {
     has(sw, asset, `service worker cache asset ${asset}`);
   }
   expect(!/music-api\.gdstudio\.xyz|https:\/\/.*api\.php/.test(sw), 'service worker must not cache third-party music API URLs');
@@ -91,6 +98,11 @@ function checkPwaJs() {
   has(js, 'offline', 'offline listener');
   has(js, 'online', 'online listener');
   has(js, 'beforeinstallprompt', 'Chromium install prompt hook');
+
+  const runtimeJs = read('webroot/js/pwa-runtime.js');
+  const runtimeVersion = runtimeJs.match(/const APP_VERSION = '([^']+)'/)?.[1] || '';
+  expect(Boolean(runtimeVersion), 'PWA runtime missing APP_VERSION');
+  has(js, runtimeVersion, 'PWA notice version must match runtime APP_VERSION');
 }
 
 function checkPwaRuntimeJs() {

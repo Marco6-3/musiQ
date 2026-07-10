@@ -8,9 +8,10 @@ const { LrclibProvider } = require('../src/server/source-providers/lrclib');
 const { Dispatcher } = require('../src/server/source-providers/dispatcher');
 const { createDefaultDispatcher } = require('../src/server/source-providers/index');
 const { MetingProvider } = require('../src/server/source-providers/meting');
+const { UnmProvider } = require('../src/server/source-providers/unm');
 const { UnmExternalProvider } = require('../src/server/source-providers/unm-external');
 const { KuwoDirectProvider } = require('../src/server/source-providers/kuwo-direct');
-const { KugouDirectProvider } = require('../src/server/source-providers/kugou-direct');
+const { KugouDirectProvider, normalizeKugouImageUrl } = require('../src/server/source-providers/kugou-direct');
 const { rankSearchResults } = require('../src/server/source-providers/match');
 const { checkSourceHealth, healthProbeForProvider } = require('../src/server/api-monitor');
 const config = require('../src/config');
@@ -135,6 +136,58 @@ describe('Dispatcher integration', () => {
       audioServer.server.close();
     }
   });
+
+  it('prefers a source-specific direct provider before generic URL fallbacks', async () => {
+    const calls = [];
+    const generic = {
+      name: 'generic-fallback',
+      enabled: true,
+      async proxy() {
+        calls.push('generic-fallback');
+        return { data: JSON.stringify({ url: 'https://example.test/wrong.mp3' }) };
+      }
+    };
+    const direct = {
+      name: 'kuwo-direct',
+      enabled: true,
+      async proxy() {
+        calls.push('kuwo-direct');
+        return { data: JSON.stringify({ url: 'https://example.test/correct.mp3' }) };
+      }
+    };
+    const dispatcher = new Dispatcher([generic, direct]);
+
+    const result = await dispatcher.proxy('url', { source: 'kuwo', id: '228908' });
+
+    assert.deepEqual(calls, ['kuwo-direct']);
+    assert.equal(JSON.parse(result.data).url, 'https://example.test/correct.mp3');
+  });
+
+  it('uses the same source preference for direct Dispatcher URL calls', async () => {
+    const calls = [];
+    const generic = {
+      name: 'generic-fallback',
+      enabled: true,
+      async url() {
+        calls.push('generic-fallback');
+        return { url: 'https://example.test/wrong.mp3', br: 320 };
+      }
+    };
+    const direct = {
+      name: 'kuwo-direct',
+      enabled: true,
+      async url() {
+        calls.push('kuwo-direct');
+        return { url: 'https://example.test/correct.mp3', br: 320 };
+      }
+    };
+    const dispatcher = new Dispatcher([generic, direct]);
+
+    const result = await dispatcher.url({ source: 'kuwo', id: '228908' }, '320');
+
+    assert.deepEqual(calls, ['kuwo-direct']);
+    assert.equal(result.url, 'https://example.test/correct.mp3');
+  });
 });
 
 describe('Provider error tolerance', () => {
@@ -151,6 +204,21 @@ describe('Provider error tolerance', () => {
     assert.deepEqual(await p.url({ id: '1', source: 'netease' }), { url: undefined, br: 320 });
     assert.deepEqual(await p.lyric({ id: '1', source: 'netease' }), { lyric: '' });
     assert.deepEqual(await p.pic({ pic_id: '1', source: 'netease' }), { url: undefined });
+  });
+
+  it('MetingProvider skips missing IDs and the unsafe Kugou artwork path', async () => {
+    const p = new MetingProvider();
+    let metingLoads = 0;
+    p._ensureMeting = async () => {
+      metingLoads += 1;
+      throw new Error('should not load Meting for an unsupported artwork request');
+    };
+
+    assert.equal(await p.pic({ source: 'kugou', pic_id: 'hash' }), null);
+    assert.equal(await p.pic({ source: 'netease', pic_id: '' }), null);
+    assert.equal(await p.proxy('pic', { source: 'kugou', id: 'hash' }), null);
+    assert.equal(await p.proxy('pic', { source: 'netease', id: '' }), null);
+    assert.equal(metingLoads, 0);
   });
 
   it('UnmExternalProvider normalizes nullable and nested lyric payloads', async () => {
@@ -203,6 +271,32 @@ SONGNAME=晴天 (Live)
     assert.equal(songs[1].id, '80456317');
   });
 
+  it('KuwoDirectProvider upgrades legacy image hosts to browser-safe HTTPS', () => {
+    const p = new KuwoDirectProvider();
+    const [song] = p._parseSearchResult(`ARTIST=周杰伦
+ALBUM=叶惠美
+DURATION=269
+IMG=http://img2.sycdn.kuwo.cn/wmvpic/cover.jpg
+MUSICRID=MUSIC_228908
+SONGNAME=晴天
+`);
+
+    assert.equal(song.pic, 'https://img2.kuwo.cn/wmvpic/cover.jpg');
+  });
+
+  it('UnmProvider does not invent reversed title and artist metadata from a query', () => {
+    const p = new UnmProvider();
+    const song = p._buildSyntheticSong({
+      id: 'synthetic',
+      keyword: '周杰伦 晴天',
+      sourceName: 'bodian',
+      directUrl: 'https://example.test/audio.flac'
+    });
+
+    assert.equal(song.name, '周杰伦 晴天');
+    assert.equal(song.artist, '');
+  });
+
   it('direct source providers do not claim non-matching URL sources', async () => {
     const p = new KuwoDirectProvider();
     p.url = async () => {
@@ -244,6 +338,14 @@ SONGNAME=晴天 (Live)
     const url = await p.proxy('url', { id: 'hash', name: '晴天', artist: '周杰伦', br: '320' });
     assert.equal(url.providerName, 'kugou-direct');
     assert.deepEqual(JSON.parse(url.data), { url: 'https://example.test/kugou-via-kuwo.mp3', br: 320, from: 'kugou-via-kuwo' });
+  });
+
+  it('KugouDirectProvider turns search artwork templates into secure cover URLs', () => {
+    assert.equal(
+      normalizeKugouImageUrl('http://imge.example.test/stdmusic/{size}/cover.jpg'),
+      'https://imge.example.test/stdmusic/400/cover.jpg'
+    );
+    assert.equal(normalizeKugouImageUrl(''), '');
   });
 
   it('direct source providers only claim matching search sources', async () => {

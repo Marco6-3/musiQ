@@ -8,6 +8,7 @@ const path = require('node:path');
 const axios = require('axios');
 const express = require('express');
 const multer = require('multer');
+const sharp = require('sharp');
 const {
   CODE_EXPIRY_SECONDS,
   createDataStore,
@@ -45,7 +46,27 @@ const {
 
 const projectRoot = path.resolve(__dirname, '../..');
 const webroot = resolveWebroot();
-const MUSIC_API_CACHE_VERSION = 'music-api-v4';
+const MUSIC_API_CACHE_VERSION = 'music-api-v7';
+const ARTWORK_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const ARTWORK_CACHE_MAX = 96;
+const ARTWORK_ALLOWED_HOST_SUFFIXES = Object.freeze([
+  'music.126.net',
+  'kuwo.cn',
+  'kugou.com',
+  'gtimg.cn',
+  'qpic.cn',
+  'migu.cn',
+  'miguvideo.com',
+  'hdslb.com',
+  'baidu.com'
+]);
+const ARTWORK_CONTENT_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/avif',
+  'image/gif'
+]);
 const AUTH_BODY_LIMIT_BYTES = 32 * 1024;
 const SYNC_BODY_LIMIT_BYTES = 16 * 1024 * 1024;
 const LOGIN_FAILURE_MAX = 6;
@@ -219,8 +240,11 @@ function createExpressApp({
   dispatcher = createDefaultDispatcher(musicSources),
   offlineCache = null,
   iosLosslessConverter = undefined,
+  artworkFetcher = fetchArtworkImage,
+  artworkProcessor = processArtworkImage,
   agentModelClient = null,
-  agentConfigResolver = undefined
+  agentConfigResolver = undefined,
+  agentUsagePolicy = undefined
 }) {
   fs.mkdirSync(uploadsDir, { recursive: true });
   fs.mkdirSync(cacheDir, { recursive: true });
@@ -251,6 +275,7 @@ function createExpressApp({
     max: VERIFICATION_FAILURE_MAX,
     lockMs: VERIFICATION_LOCK_MS
   });
+  const artworkCache = new Map();
 
   app.set('trust proxy', 'loopback');
   app.disable('x-powered-by');
@@ -288,6 +313,14 @@ function createExpressApp({
   app.use('/js', express.static(path.join(webroot, 'js'), { fallthrough: false }));
   app.use('/public', express.static(path.join(webroot, 'public'), { fallthrough: false }));
   app.use('/uploads', express.static(path.join(store.dataDir, 'uploads'), { fallthrough: false }));
+  app.get('/media/artwork', (req, res) => {
+    handleMediaArtwork(req, res, { artworkFetcher, artworkProcessor, artworkCache }).catch((error) => {
+      console.warn('[express-backend] artwork proxy failed:', error.message);
+      if (!res.headersSent) {
+        res.status(502).json({ success: false, message: '封面暂时不可用' });
+      }
+    });
+  });
   app.get('/api_check/check_api.php', (_req, res) => {
     res.type('html').sendFile(path.join(webroot, 'api_check', 'check_api.php'));
   });
@@ -343,7 +376,8 @@ function createExpressApp({
       dispatcher,
       offlineCache,
       agentModelClient,
-      agentConfigResolver
+      agentConfigResolver,
+      agentUsagePolicy
     }).catch(next);
   });
   registerPlayHistory(app, db, requireUserAuth(db));
@@ -362,6 +396,118 @@ function createExpressApp({
 
 function sendIndex(_req, res) {
   res.type('html').sendFile(path.join(webroot, 'index.html'));
+}
+
+async function handleMediaArtwork(req, res, options = {}) {
+  const artworkFetcher = options.artworkFetcher || fetchArtworkImage;
+  const artworkProcessor = options.artworkProcessor || processArtworkImage;
+  const artworkCache = options.artworkCache || null;
+  const target = parseAllowedArtworkUrl(req.query.url);
+  if (!target) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(400).json({ success: false, message: '不支持的封面地址' });
+    return;
+  }
+
+  const cacheKey = crypto.createHash('sha256').update(target.href).digest('hex');
+  let image = artworkCache?.get(cacheKey) || null;
+  if (image && artworkCache) {
+    artworkCache.delete(cacheKey);
+    artworkCache.set(cacheKey, image);
+  }
+  if (!image) {
+    const sourceImage = await artworkFetcher(target);
+    image = await artworkProcessor(sourceImage);
+    if (artworkCache) {
+      artworkCache.set(cacheKey, image);
+      while (artworkCache.size > ARTWORK_CACHE_MAX) {
+        artworkCache.delete(artworkCache.keys().next().value);
+      }
+    }
+  }
+  const body = Buffer.isBuffer(image?.data) ? image.data : Buffer.from(image?.data || '');
+  const contentType = String(image?.contentType || '').split(';')[0].trim().toLowerCase();
+  if (!body.length || body.length > ARTWORK_IMAGE_MAX_BYTES || !ARTWORK_CONTENT_TYPES.has(contentType)) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(502).json({ success: false, message: '封面响应无效' });
+    return;
+  }
+
+  const etag = `"${crypto.createHash('sha256').update(body).digest('hex')}"`;
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Length', String(body.length));
+  res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('ETag', etag);
+  if (req.headers['if-none-match'] === etag) {
+    res.status(304).end();
+    return;
+  }
+  res.status(200).send(body);
+}
+
+async function fetchArtworkImage(target) {
+  const response = await axios.get(target.href, {
+    timeout: 8000,
+    responseType: 'arraybuffer',
+    maxContentLength: ARTWORK_IMAGE_MAX_BYTES,
+    maxBodyLength: ARTWORK_IMAGE_MAX_BYTES,
+    maxRedirects: 3,
+    validateStatus: (status) => status >= 200 && status < 300,
+    beforeRedirect: (options) => {
+      const protocol = String(options.protocol || '').toLowerCase();
+      const hostname = String(options.hostname || '').toLowerCase();
+      if (!['http:', 'https:'].includes(protocol) || !isAllowedArtworkHost(hostname)) {
+        throw new Error('artwork redirect blocked');
+      }
+    },
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15',
+      Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.1'
+    }
+  });
+  return {
+    data: Buffer.from(response.data || ''),
+    contentType: response.headers['content-type'] || ''
+  };
+}
+
+async function processArtworkImage(image) {
+  const source = Buffer.isBuffer(image?.data) ? image.data : Buffer.from(image?.data || '');
+  const sourceType = String(image?.contentType || '').split(';')[0].trim().toLowerCase();
+  if (!source.length || source.length > ARTWORK_IMAGE_MAX_BYTES || !ARTWORK_CONTENT_TYPES.has(sourceType)) {
+    throw new Error('invalid artwork source');
+  }
+
+  const data = await sharp(source, { limitInputPixels: 40_000_000 })
+    .rotate()
+    .resize(512, 512, {
+      fit: 'contain',
+      background: { r: 7, g: 17, b: 13, alpha: 1 }
+    })
+    .flatten({ background: { r: 7, g: 17, b: 13 } })
+    .jpeg({ quality: 86, progressive: true, mozjpeg: true })
+    .toBuffer();
+
+  return { data, contentType: 'image/jpeg' };
+}
+
+function parseAllowedArtworkUrl(value) {
+  try {
+    const target = new URL(String(value || ''));
+    if (!['http:', 'https:'].includes(target.protocol)) return null;
+    if (target.username || target.password) return null;
+    if (!isAllowedArtworkHost(target.hostname)) return null;
+    if (target.port && !['80', '443'].includes(target.port)) return null;
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedArtworkHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+  return ARTWORK_ALLOWED_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
 }
 
 function createUploadMiddleware(uploadsDir) {
@@ -1429,6 +1575,10 @@ function pipeAudioFile(res, filePath, options) {
 }
 
 async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, options = {}) {
+  // The server owns music API caching and reports it through X-Cache. Browser
+  // and intermediary caches must not pin stale provider metadata or signed URLs.
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Pragma', 'no-cache');
   const apiQuery = normalizeMusicApiQuery(req);
 
   if (apiQuery.types === 'url' && offlineCache) {
@@ -2024,5 +2174,9 @@ if (require.main === module) {
 
 module.exports = {
   startLocalBackend,
-  createExpressApp
+  createExpressApp,
+  handleMediaArtwork,
+  isAllowedArtworkHost,
+  parseAllowedArtworkUrl,
+  processArtworkImage
 };

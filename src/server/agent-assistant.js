@@ -12,18 +12,23 @@ const {
   stringValue,
   normalizeArtist
 } = require('./database');
+const { selectBestSongCandidate } = require('./source-providers/match');
 
 const DEFAULT_AGENT_MODEL = 'deepseek-v4-flash';
 const DEFAULT_AGENT_BASE_URL = 'https://api.deepseek.com';
 const MAX_AGENT_MESSAGE_LENGTH = 2000;
 const MAX_AGENT_SONGS = 20;
 const DEFAULT_SEARCH_SOURCES = ['netease', 'kuwo', 'tencent', 'kugou', 'bilibili'];
+const DEFAULT_AGENT_DAILY_LIMIT = 2;
+const DEFAULT_AGENT_UNLIMITED_USERS = ['mingzhe'];
+const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 async function handleAgentAssistant(db, req, res, {
   dispatcher,
   offlineCache,
   agentModelClient,
-  agentConfigResolver = resolveAgentConfig
+  agentConfigResolver = resolveAgentConfig,
+  agentUsagePolicy = {}
 } = {}) {
   const userId = Number(req.body.user_id || 0);
   const message = stringValue(req.body.message).slice(0, MAX_AGENT_MESSAGE_LENGTH);
@@ -32,6 +37,21 @@ async function handleAgentAssistant(db, req, res, {
 
   if (!userId) return res.status(401).json({ success: false, message: '登录已过期，请重新登录' });
   if (!message) return res.json({ success: false, message: '请先告诉助手要添加哪些歌曲' });
+
+  const authenticatedUsername = stringValue(req.authUser?.username
+    || db.prepare('SELECT username FROM users WHERE id = ?').get(userId)?.username);
+  const usage = reserveAgentUsage(db, {
+    userId,
+    username: authenticatedUsername,
+    dailyLimit: agentUsagePolicy.dailyLimit,
+    unlimitedUsers: agentUsagePolicy.unlimitedUsers
+  });
+  if (!usage.allowed) {
+    return sendAgentJson(res, {
+      success: false,
+      message: `今天的 ${usage.limit} 次助手额度已用完，明天 00:00（北京时间）恢复。`
+    }, usage, 429);
+  }
 
   const playlists = getUserPlaylistsArray(db, userId);
   const context = {
@@ -47,36 +67,36 @@ async function handleAgentAssistant(db, req, res, {
   const normalizedPlan = normalizeAgentPlan(plan);
 
   if (normalizedPlan.action === 'query_playlist_songs') {
-    return handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlaylistName, res);
+    return handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlaylistName, res, usage);
   }
 
   if (normalizedPlan.action !== 'add_songs_to_playlist') {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: normalizedPlan.action,
       reply: normalizedPlan.reply || '我可以帮你把歌曲加入歌单，也可以查看某个歌单里的歌曲。',
       configured: Boolean(normalizedPlan.configured),
       model: normalizedPlan.model || ''
-    });
+    }, usage);
   }
 
   const playlistName = stringValue(normalizedPlan.playlist_name || selectedPlaylistName);
   if (!playlistName) {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: 'ask_clarification',
       reply: '要加入哪个歌单？可以告诉我歌单名，例如“把晴天加入通勤歌单”。',
       songs: normalizedPlan.songs
-    });
+    }, usage);
   }
 
   const requestedSongs = normalizedPlan.songs.slice(0, MAX_AGENT_SONGS);
   if (!requestedSongs.length) {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: 'ask_clarification',
       reply: '我还没有识别到具体歌曲。请把歌名发给我，可以一次发多首。'
-    });
+    }, usage);
   }
 
   const searchSources = normalizeSearchSources(preferredSource);
@@ -90,7 +110,7 @@ async function handleAgentAssistant(db, req, res, {
   }
 
   if (!resolvedSongs.length) {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: 'no_matches',
       reply: '没有在当前音源里找到可加入的歌曲。可以补充歌手名，或换一个音乐源再试。',
@@ -98,11 +118,11 @@ async function handleAgentAssistant(db, req, res, {
       unresolved_songs: unresolvedSongs,
       configured: Boolean(normalizedPlan.configured),
       model: normalizedPlan.model || ''
-    });
+    }, usage);
   }
 
   const playlist = ensurePlaylist(db, userId, playlistName);
-  if (!playlist) return res.json({ success: false, message: '歌单名称不能为空' });
+  if (!playlist) return sendAgentJson(res, { success: false, message: '歌单名称不能为空' }, usage);
 
   const addedSongs = [];
   const existingSongs = [];
@@ -128,7 +148,7 @@ async function handleAgentAssistant(db, req, res, {
   if (existingSongs.length) replyParts.push(`${existingSongs.length} 首已在歌单中`);
   if (unresolvedSongs.length) replyParts.push(`${unresolvedSongs.length} 首暂未找到`);
 
-  return res.json({
+  return sendAgentJson(res, {
     success: true,
     action: 'add_songs_to_playlist',
     reply: replyParts.join('，') || `「${playlist.name}」没有新增歌曲`,
@@ -140,24 +160,24 @@ async function handleAgentAssistant(db, req, res, {
     user: userWithCollections(db, userId),
     configured: Boolean(normalizedPlan.configured),
     model: normalizedPlan.model || ''
-  });
+  }, usage);
 }
 
-function handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlaylistName, res) {
+function handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlaylistName, res, usage) {
   const playlistName = stringValue(normalizedPlan.playlist_name || selectedPlaylistName);
   if (!playlistName) {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: 'ask_clarification',
       reply: '要查看哪个歌单？可以告诉我歌单名，例如“查看通勤歌单里的歌曲”。',
       configured: Boolean(normalizedPlan.configured),
       model: normalizedPlan.model || ''
-    });
+    }, usage);
   }
 
   const playlist = findPlaylistByName(playlists, playlistName);
   if (!playlist) {
-    return res.json({
+    return sendAgentJson(res, {
       success: true,
       action: 'query_playlist_songs',
       reply: `没有找到「${playlistName}」这个歌单。`,
@@ -165,11 +185,11 @@ function handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlay
       playlists: playlists.map((item) => ({ name: item.name, song_count: item.song_count || 0 })),
       configured: Boolean(normalizedPlan.configured),
       model: normalizedPlan.model || ''
-    });
+    }, usage);
   }
 
   const songs = Array.isArray(playlist.songs) ? playlist.songs : [];
-  return res.json({
+  return sendAgentJson(res, {
     success: true,
     action: 'query_playlist_songs',
     reply: buildPlaylistSongsReply(playlist.name, songs),
@@ -178,7 +198,95 @@ function handlePlaylistQuery(db, userId, playlists, normalizedPlan, selectedPlay
     user: userWithCollections(db, userId),
     configured: Boolean(normalizedPlan.configured),
     model: normalizedPlan.model || ''
+  }, usage);
+}
+
+function sendAgentJson(res, payload, usage, status = 200) {
+  return res.status(status).json({
+    ...payload,
+    agent_usage: publicAgentUsage(usage)
   });
+}
+
+function reserveAgentUsage(db, {
+  userId,
+  username,
+  dailyLimit = DEFAULT_AGENT_DAILY_LIMIT,
+  unlimitedUsers,
+  now = Date.now()
+} = {}) {
+  const usageDate = chinaUsageDate(now);
+  const limit = Math.max(1, Math.min(1000, Number(dailyLimit || DEFAULT_AGENT_DAILY_LIMIT)));
+  const configuredUsers = unlimitedUsers === undefined
+    ? (process.env.MUSIC_AGENT_UNLIMITED_USERS || process.env.MUSIQ_AGENT_UNLIMITED_USERS || DEFAULT_AGENT_UNLIMITED_USERS)
+    : unlimitedUsers;
+  const unlimitedSet = new Set((Array.isArray(configuredUsers) ? configuredUsers : String(configuredUsers || '').split(','))
+    .map((value) => stringValue(value).toLowerCase())
+    .filter(Boolean));
+  const unlimited = unlimitedSet.has(stringValue(username).toLowerCase());
+  const resetAt = chinaNextResetAt(usageDate);
+
+  if (unlimited) {
+    return {
+      allowed: true,
+      unlimited: true,
+      limit: null,
+      used: null,
+      remaining: null,
+      usageDate,
+      resetAt
+    };
+  }
+
+  const reserve = db.transaction(() => {
+    const existing = db.prepare(`
+      SELECT request_count FROM agent_usage
+      WHERE user_id = ? AND usage_date = ?
+    `).get(Number(userId), usageDate);
+    const used = Number(existing?.request_count || 0);
+    if (used >= limit) {
+      return { allowed: false, used };
+    }
+
+    db.prepare(`
+      INSERT INTO agent_usage (user_id, usage_date, request_count, updated_at)
+      VALUES (?, ?, 1, strftime('%s', 'now'))
+      ON CONFLICT(user_id, usage_date) DO UPDATE SET
+        request_count = request_count + 1,
+        updated_at = strftime('%s', 'now')
+    `).run(Number(userId), usageDate);
+    return { allowed: true, used: used + 1 };
+  });
+  const result = reserve();
+  return {
+    allowed: result.allowed,
+    unlimited: false,
+    limit,
+    used: result.used,
+    remaining: Math.max(0, limit - result.used),
+    usageDate,
+    resetAt
+  };
+}
+
+function publicAgentUsage(usage) {
+  return {
+    unlimited: Boolean(usage?.unlimited),
+    limit: usage?.limit ?? null,
+    used: usage?.used ?? null,
+    remaining: usage?.remaining ?? null,
+    usage_date: usage?.usageDate || '',
+    reset_at: usage?.resetAt || ''
+  };
+}
+
+function chinaUsageDate(now = Date.now()) {
+  return new Date(Number(now) + CHINA_TIME_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function chinaNextResetAt(usageDate) {
+  const [year, month, day] = String(usageDate).split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day + 1) - CHINA_TIME_OFFSET_MS).toISOString();
 }
 
 async function createAgentPlan(message, context, { agentModelClient, agentConfigResolver } = {}) {
@@ -225,6 +333,9 @@ async function createDeepSeekPlan(message, context, config) {
           '如果用户要把歌曲加入歌单，输出 action=add_songs_to_playlist、playlist_name 和 songs。',
           '如果用户要查看、查询、列出某个歌单里的歌曲，输出 action=query_playlist_songs 和 playlist_name，songs 为空数组。',
           'songs 中每项包含 title 和 artist；不知道歌手时 artist 为空字符串。',
+          '要理解口语、省略句和批量请求，例如“往通勤里放晴天和七里香”“把《晴天》（周杰伦）收进当前歌单”。',
+          '用户说“这个歌单、当前歌单、这里”时优先使用 selected_playlist_name；提到已有歌单时沿用 existing_playlists 中的准确名称。',
+          '同一句有多首歌时逐首拆分；用户明确写出的歌手必须保留，不要把歌手名并入歌名。',
           '如果缺少目标歌单或具体歌曲，输出 action=ask_clarification 和 reply。',
           '不要编造用户没有提到的歌曲。'
         ].join('\n')
@@ -268,7 +379,7 @@ function createHeuristicPlan(message, context = {}) {
   }
 
   const playlistName = inferPlaylistName(message, context);
-  const songs = inferSongs(message);
+  const songs = inferSongs(message, { ...context, playlistName });
   if (!playlistName) {
     return {
       action: 'ask_clarification',
@@ -300,6 +411,8 @@ function inferPlaylistName(message, context = {}) {
 
   const patterns = [
     /(?:加入|加到|放到|添加到|存到)\s*([^，。,.!?！？\s]{1,30})\s*(?:歌单|列表|playlist)/i,
+    /(?:收进|放进|塞进|放入|移到|收藏到)\s*(?:我的)?\s*([^，。,.!?！？\s]{1,30})\s*(?:歌单|列表|playlist)/i,
+    /(?:往|给)\s*(?:我的)?\s*([^，。,.!?！？\s]{1,30})\s*(?:歌单|列表|playlist)(?:里|中)?/i,
     /(?:歌单|playlist)\s*[:：]\s*([^，。,.!?！？\s]{1,30})/i,
     /(?:到|进)\s*([^，。,.!?！？\s]{1,30})\s*(?:歌单|列表)/i
   ];
@@ -340,29 +453,60 @@ function inferExistingPlaylistName(message, context = {}) {
 
 function isPlaylistQueryRequest(message) {
   const text = String(message || '');
-  if (/(?:加入|加到|放到|添加到|存到|新增)/.test(text)) return false;
+  if (/(?:加入|加到|放到|添加到|存到|新增|收进|放进|塞进|放入|移到|收藏到)/.test(text)) return false;
+  if (/(?:往|给).*(?:歌单|列表).*(?:放|加|塞|收|存)/.test(text)) return false;
   return /(?:查看|查询|看看|列出|显示|有哪些|有什么|多少|几首|歌单.*(?:里|中|里面|歌曲|歌|内容))/.test(text);
 }
 
-function inferSongs(message) {
-  let text = String(message || '')
-    .replace(/请|帮我|麻烦|可以|把|将|歌曲|歌名|这些歌|这些歌曲/g, '')
-    .replace(/(?:加入|加到|放到|添加到|存到|导入|新增).*/g, '')
+function inferSongs(message, context = {}) {
+  const original = String(message || '');
+  const playlistName = stringValue(context.playlistName || context.selectedPlaylistName);
+  let text = original
+    .replace(/^\s*(?:请|麻烦|劳驾)?\s*(?:帮我|替我|给我)?\s*(?:把|将)?\s*(?:添加|加入|收藏|收录|导入)?\s*/i, '')
+    .replace(/\s*(?:加入|加到|放到|添加到|存到|导入到|收进|放进|塞进|放入|移到|收藏到|到|进)\s*(?:我的)?[^，。,.!?！？]{0,60}(?:歌单|列表|playlist)(?:里|中|里面)?[，。,.!?！？]*$/i, '')
     .trim();
-  const quoted = Array.from(String(message || '').matchAll(/[“"『「']([^”"』」']{1,80})[”"』」']/g))
+  if (playlistName) {
+    const escapedPlaylist = escapeRegExp(playlistName);
+    text = text.replace(new RegExp(`^\\s*(?:往|给)\\s*(?:我的)?\\s*${escapedPlaylist}(?:歌单|列表)?(?:里|中|里面)?\\s*(?:放|加|塞|收录|存)(?:一下|一些|点)?\\s*`, 'i'), '').trim();
+    text = text.replace(new RegExp(`\\s*(?:加入|加到|放到|添加到|存到|收进|放进|塞进|放入|移到|收藏到|到|进)\\s*(?:我的)?\\s*${escapedPlaylist}(?:歌单|列表)?(?:里|中|里面)?[，。,.!?！？]*$`, 'i'), '').trim();
+  }
+
+  const decorated = Array.from(original.matchAll(/[《“"『「]([^》”"』」]{1,80})[》”"』」]\s*(?:[（(]([^）)]{1,60})[）)])?/g))
+    .map((match) => ({ title: cleanupSongTitle(match[1]), artist: stringValue(match[2]) }))
+    .filter((song) => song.title && normalizeMentionText(song.title) !== normalizeMentionText(playlistName));
+  if (decorated.length && decorated.some((song) => song.artist)) {
+    return decorated.slice(0, MAX_AGENT_SONGS);
+  }
+
+  const quoted = Array.from(original.matchAll(/[“"『「《']([^”"』」》']{1,80})[”"』」》']/g))
     .map((match) => match[1].trim())
-    .filter(Boolean);
-  const rawItems = quoted.length ? quoted : text.split(/[，,、\n；;]+|\s+和\s+|\s+以及\s+/);
+    .filter((item) => item && normalizeMentionText(item) !== normalizeMentionText(playlistName));
+  const rawItems = quoted.length
+    ? quoted
+    : text.split(/[，,、\n；;]+|\s*(?:和|以及|还有|再加上|跟)\s*/);
+  let inheritedArtist = '';
   return rawItems
     .map((item) => parseSongMention(item))
     .filter((song) => song.title)
+    .map((song) => {
+      if (song.artist) inheritedArtist = song.artist;
+      else if (inheritedArtist) song.artist = inheritedArtist;
+      return song;
+    })
     .slice(0, MAX_AGENT_SONGS);
 }
 
 function parseSongMention(value) {
-  const text = String(value || '').trim().replace(/^[-*]\s*/, '');
+  const text = String(value || '')
+    .trim()
+    .replace(/^[-*]\s*/, '')
+    .replace(/^(?:再|也|顺便)?\s*(?:加上|添加|加入|来一首|来点|放入)?\s*/i, '');
   if (!text) return { title: '', artist: '' };
-  const byArtist = text.match(/^(.+?)[\s-]+(?:by|--|——|-)\s*(.+)$/i);
+  const parentheticalArtist = text.match(/^[《“"『「]?(.+?)[》”"』」]?[（(]([^）)]+)[）)]$/);
+  if (parentheticalArtist) {
+    return { title: cleanupSongTitle(parentheticalArtist[1]), artist: stringValue(parentheticalArtist[2]) };
+  }
+  const byArtist = text.match(/^(.+?)\s*(?:\bby\b|--|——|—|–|-)\s*(.+)$/i);
   if (byArtist) return { title: cleanupSongTitle(byArtist[1]), artist: stringValue(byArtist[2]) };
   const cnArtist = text.match(/^(.+?)(?:的|演唱的)(.+)$/);
   if (cnArtist) return { title: cleanupSongTitle(cnArtist[2]), artist: stringValue(cnArtist[1]) };
@@ -409,7 +553,9 @@ async function resolveRequestedSong(requestSong, dispatcher, sources) {
   for (const source of sources) {
     try {
       const candidates = await dispatcher.search(source, keyword, 5);
-      const match = chooseBestSongMatch(candidates, title, artist ? [artist] : []);
+      const match = selectBestSongCandidate({ name: title, artist }, candidates, {
+        minScore: artist ? 58 : 50
+      });
       if (match) {
         return normalizeResolvedSong(match, {
           source,
@@ -437,22 +583,6 @@ function normalizeResolvedSong(song, fallback) {
   };
 }
 
-function chooseBestSongMatch(candidates, name, artists) {
-  if (!Array.isArray(candidates) || !candidates.length) return null;
-  const normalizedName = normalizeMatchText(name);
-  const normalizedArtists = artists.map(normalizeMatchText).filter(Boolean);
-  return candidates.find((candidate) => {
-    const candidateName = normalizeMatchText(candidate.name || candidate.title || candidate.song_title);
-    const candidateArtists = artistList(candidate.artist || candidate.singer || candidate.song_artist).map(normalizeMatchText);
-    const titleMatches = candidateName === normalizedName
-      || candidateName.includes(normalizedName)
-      || normalizedName.includes(candidateName);
-    const artistMatches = !normalizedArtists.length
-      || normalizedArtists.some((artist) => candidateArtists.some((candidateArtist) => candidateArtist.includes(artist) || artist.includes(candidateArtist)));
-    return titleMatches && artistMatches;
-  }) || candidates[0];
-}
-
 function normalizeSearchSources(preferredSource) {
   const source = stringValue(preferredSource || 'netease');
   return [source, ...DEFAULT_SEARCH_SOURCES].filter((item, index, list) => item && list.indexOf(item) === index);
@@ -461,14 +591,6 @@ function normalizeSearchSources(preferredSource) {
 function artistList(value) {
   if (Array.isArray(value)) return value;
   return normalizeArtist(value).split(/[,/&、]/).map((artist) => artist.trim()).filter(Boolean);
-}
-
-function normalizeMatchText(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[（(].*?[）)]/g, '')
-    .replace(/\s+/g, '')
-    .trim();
 }
 
 function normalizeMentionText(value) {
@@ -505,8 +627,12 @@ function buildPlaylistSongsReply(playlistName, songs) {
 function cleanupSongTitle(value) {
   return stringValue(value)
     .replace(/^(听|播放|添加|加入|收藏)\s*/g, '')
-    .replace(/[“”"『』「」']/g, '')
+    .replace(/[“”"『』「」《》']/g, '')
     .trim();
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function extractJsonObject(content) {

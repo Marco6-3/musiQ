@@ -81,10 +81,14 @@ class Dispatcher {
     return health;
   }
 
-  _sortedProviders() {
-    return [...this.providers].sort(
-      (a, b) => this._getHealth(b).effectiveScore() - this._getHealth(a).effectiveScore()
-    );
+  _sortedProviders(preferredName = '') {
+    return [...this.providers].sort((a, b) => {
+      if (preferredName) {
+        if (a.name === preferredName && b.name !== preferredName) return -1;
+        if (b.name === preferredName && a.name !== preferredName) return 1;
+      }
+      return this._getHealth(b).effectiveScore() - this._getHealth(a).effectiveScore();
+    });
   }
 
   _recordSuccess(provider) {
@@ -100,7 +104,7 @@ class Dispatcher {
   }
 
   async _fallback(method, ...args) {
-    const sorted = this._sortedProviders();
+    const sorted = this._sortedProviders(preferredProviderName(method, args));
     for (const provider of sorted) {
       const health = this._getHealth(provider);
       if (!health.isHealthy()) {
@@ -123,7 +127,7 @@ class Dispatcher {
   }
 
   async _race(method, ...args) {
-    const sorted = this._sortedProviders();
+    const sorted = this._sortedProviders(preferredProviderName(method, args));
     const healthy = sorted.filter((p) => this._getHealth(p).isHealthy());
 
     if (healthy.length === 0) return emptyResult(method);
@@ -233,7 +237,7 @@ class Dispatcher {
   // For lossless requests: query all healthy providers in parallel, probe each URL,
   // and return the one with the highest verified bitrate.
   async _selectBest(method, ...args) {
-    const sorted = this._sortedProviders();
+    const sorted = this._sortedProviders(preferredProviderName(method, args));
     const healthy = sorted.filter((p) => this._getHealth(p).isHealthy());
 
     if (healthy.length === 0) return emptyResult(method);
@@ -349,6 +353,19 @@ class Dispatcher {
     }
     return status;
   }
+}
+
+function preferredProviderName(method, args) {
+  let types = method;
+  let params = args?.[0];
+  if (method === 'proxy') {
+    [types, params] = args || [];
+  }
+  if (!['url', 'lyric', 'pic'].includes(types)) return '';
+  return {
+    kuwo: 'kuwo-direct',
+    kugou: 'kugou-direct'
+  }[params?.source] || '';
 }
 
 function emptyResult(method) {

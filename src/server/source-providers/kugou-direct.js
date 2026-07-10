@@ -53,6 +53,7 @@ class KugouDirectProvider extends BaseProvider {
         .map((item) => {
           const id = item.FileHash || item.Hash;
           const name = (item.SongName || '').replace(/<\/?em>/g, '');
+          const coverUrl = normalizeKugouImageUrl(item.Image || item.AlbumImage);
           return {
             id,
             url_id: id,
@@ -64,6 +65,8 @@ class KugouDirectProvider extends BaseProvider {
             album: item.AlbumName || '',
             source: 'kugou',
             duration: (Number(item.Duration || 0)) * 1000,
+            pic: coverUrl,
+            cover_url: coverUrl,
             // Store additional hashes for quality fallback
             _hash: item.Hash || item.FileHash,
             _sqHash: item.SQHash || '',
@@ -230,6 +233,7 @@ class KugouDirectProvider extends BaseProvider {
           name: params.name,
           title: params.name,
           artist: params.artist,
+          duration: Number(params.duration || 0),
           source: 'kugou'
         }, params.br || '320');
         if (!result?.url) return null;
@@ -258,4 +262,10 @@ class KugouDirectProvider extends BaseProvider {
   }
 }
 
-module.exports = { KugouDirectProvider };
+function normalizeKugouImageUrl(value, size = 400) {
+  return String(value || '')
+    .replaceAll('{size}', String(size))
+    .replace(/^http:\/\//i, 'https://');
+}
+
+module.exports = { KugouDirectProvider, normalizeKugouImageUrl };

@@ -7,6 +7,7 @@
     const root = document.documentElement;
     const fallbackCover = 'public/music-default.png';
     const fallbackArtwork = 'public/icons/icon-192.png';
+    const mediaArtwork = window.__musicMediaArtwork || null;
     const musiqRuntime = window.__musiqRuntime || createRuntimeFallback();
     const pwaDebugEnabled = new URLSearchParams(window.location.search).get('debugPwa') === '1';
     const mediaSessionActions = ['play', 'pause', 'previoustrack', 'nexttrack', 'seekto', 'seekbackward', 'seekforward', 'stop'];
@@ -68,6 +69,7 @@
         cloudSyncInFlight: false,
         agentMessages: [],
         agentBusy: false,
+        agentUsage: null,
         renamingPlaylistName: null,
         resumeWatchdogTimer: 0,
         playbackWatchdogTimer: 0,
@@ -79,6 +81,7 @@
         nextAudioPrewarmUrl: '',
         lastBufferingToastAt: 0,
         lastMediaPositionUpdateAt: 0,
+        lastBackgroundTickAt: 0,
         sourceDiagnostics: {
             musicSource: '',
             cache: '',
@@ -342,6 +345,14 @@
             renderPwaDiagnostics();
         });
         audio.addEventListener('timeupdate', () => {
+            if (document.hidden) {
+                const now = Date.now();
+                if (now - state.lastBackgroundTickAt < 5000) return;
+                state.lastBackgroundTickAt = now;
+                rememberPlaybackSnapshot();
+                updateMediaSessionPositionState();
+                return;
+            }
             rememberPlaybackSnapshot();
             updateProgress();
             updateMediaSessionPositionState();
@@ -413,7 +424,9 @@
             document.body.classList.toggle('is-low-power-runtime', state.lowPowerMode && !audio.paused);
             if (document.hidden) {
                 rememberPlaybackSnapshot();
-                if (state.currentSong && !audio.paused) scheduleNextAudioPrefetch({ immediate: true });
+                if (state.currentSong && !audio.paused && musiqRuntime.isIOS && musiqRuntime.isStandalonePwa) {
+                    scheduleNextAudioPrefetch({ immediate: true });
+                }
                 if (state.currentSong && (audio.src || state.lastPlayableUrl) && canUseFullMediaSession()) {
                     setupMediaSessionHandlers();
                     updateMediaSessionPlaybackState();
@@ -838,12 +851,19 @@
         const playlistOptions = state.playlists.map((playlist) => `
             <option value="${escapeAttr(playlist.name)}">${escapeHtml(playlist.name)}</option>
         `).join('');
+        const usageLabel = state.agentUsage?.unlimited
+            ? '无限额度'
+            : state.agentUsage
+                ? `今日剩余 ${state.agentUsage.remaining}/${state.agentUsage.limit}`
+                : String(state.currentUser.username || '').toLowerCase() === 'mingzhe'
+                    ? '无限额度'
+                    : '每日 2 次';
         els.viewRoot.innerHTML = `
             <div class="agent-workspace">
                 <div class="section-head">
                     <div>
                         <h2>Agent 助手</h2>
-                        <p class="meta">${state.agentBusy ? '处理中' : `${state.playlists.length} 个歌单`}</p>
+                        <p class="meta">${state.agentBusy ? '处理中' : `${state.playlists.length} 个歌单 · ${usageLabel}`}</p>
                     </div>
                     <select id="agent-playlist-select" class="agent-playlist-select">
                         <option value="">自动识别歌单</option>
@@ -909,6 +929,7 @@
                 source: els.sourceSelect?.value || 'netease'
             });
             if (!data.success) throw new Error(data.message || '助手处理失败');
+            if (data.agent_usage) state.agentUsage = data.agent_usage;
             if (data.user) {
                 state.currentUser = data.user;
                 state.favorites = normalizeSongList(data.user.favorites || []);
@@ -1271,7 +1292,9 @@
                     silentFallbackToast: Boolean(options.autoAdvance)
                 });
             } catch (error) {
+                if (!isCurrentPlayRequest(playRequestId)) return;
                 const fallbackSong = await resolvePlaybackFallbackSong(state.currentSong);
+                if (!isCurrentPlayRequest(playRequestId)) return;
                 if (!fallbackSong) throw error;
 
                 setPlayerStatus('正在换源');
@@ -1293,6 +1316,7 @@
                     silentFallbackToast: Boolean(options.autoAdvance)
                 });
             }
+            if (!isCurrentPlayRequest(playRequestId)) return;
             const url = urlData.url || urlData.data?.url;
             if (!url) throw new Error('没有可用播放地址');
             state.currentQuality = String(urlData.br || state.currentQuality);
@@ -1303,9 +1327,15 @@
             rememberPlayableUrl(url);
             audio.load();
             await playAudioWithRuntimeGuard({
-                notAllowedMessage: 'iPhone Safari 需要再次点按播放按钮开始播放',
+                notAllowedMessage: musiqRuntime.isIOS
+                    ? 'iPhone Safari 需要再次点按播放按钮开始播放'
+                    : '浏览器阻止了自动播放，请再次点按播放按钮',
                 genericMessage: '播放失败'
             });
+            if (!isCurrentPlayRequest(playRequestId)) {
+                audio.pause();
+                return;
+            }
             updateMediaSessionMetadata({ afterPlaybackStart: true });
             startPlaybackWatchdog({
                 reason: options.autoAdvance ? 'auto-advance' : 'play-song',
@@ -1316,6 +1346,7 @@
             recordSuccessfulPlay(state.currentSong);
             applyPlaybackMetadataWhenReady(playRequestId, state.currentSong, metadata);
         } catch (error) {
+            if (!isCurrentPlayRequest(playRequestId)) return;
             const message = error?.userMessage || error.message || '播放失败';
             if (error?.name === 'NotAllowedError') {
                 setPlayerStatus('点按播放继续');
@@ -1327,6 +1358,10 @@
             notifyAndroidPlayback('stopped');
             showToast(message, 'error');
         }
+    }
+
+    function isCurrentPlayRequest(playRequestId) {
+        return Number(playRequestId) === state.playRequestId;
     }
 
     function beginPlaybackMetadataLoad(song) {
@@ -1509,12 +1544,15 @@
 
     async function refreshCurrentPlaybackStream({ resumeAt = 0, reason = '' } = {}) {
         if (!state.currentSong) return;
+        const playRequestId = state.playRequestId;
+        const targetSong = normalizeSong(state.currentSong);
         const requested = normalizeRequestedQuality(state.currentQuality || els.qualitySelect.value);
         setPlayerStatus(['silent-resume-watchdog', 'auto-advance-silent', 'premature-ended'].includes(reason) ? '正在恢复声音' : '正在恢复播放');
         const data = await getAudioUrlForPlayback(state.currentSong, requested, {
             forceRefresh: reason === 'auto-advance-silent' || reason === 'silent-resume-watchdog' || reason === 'premature-ended',
             silentFallbackToast: true
         });
+        if (!isCurrentPlayRequest(playRequestId) || !sameSong(state.currentSong, targetSong)) return;
         const url = data.url || data.data?.url;
         if (!url) throw new Error('没有可用播放地址');
         state.currentQuality = String(data.br || requested);
@@ -1525,6 +1563,10 @@
         audio.load();
         restoreAudioPositionWhenReady(resumeAt);
         await playAudioWithRuntimeGuard();
+        if (!isCurrentPlayRequest(playRequestId) || !sameSong(state.currentSong, targetSong)) {
+            audio.pause();
+            return;
+        }
         updateMediaSessionMetadata({ afterPlaybackStart: true });
         if (reason === 'auto-advance-silent' || reason === 'silent-resume-watchdog' || reason === 'premature-ended') {
             startPlaybackWatchdog({
@@ -1803,7 +1845,8 @@
                 br: retryQuality,
                 name: state.currentSong.name || '',
                 artist: formatArtists(state.currentSong.artist),
-                album: state.currentSong.album || ''
+                album: state.currentSong.album || '',
+                duration: Number(state.currentSong.duration || 0)
             });
             const url = data.url || data.data?.url;
             if (!url) return;
@@ -1868,7 +1911,8 @@
             br: quality,
             name: song.name || '',
             artist: formatArtists(song.artist),
-            album: song.album || ''
+            album: song.album || '',
+            duration: Number(song.duration || 0)
         });
     }
 
@@ -2134,7 +2178,7 @@
         const title = song?.name || '未选择歌曲';
         const artist = song ? formatArtists(song.artist) : '未知艺术家';
         [els.dockCover, els.sideCover, els.expandedCover].forEach((img) => {
-            img.src = cover || fallbackCover;
+            setPlayerCover(img, cover, song);
         });
         [els.dockTitle, els.sideTitle, els.expandedTitle].forEach((el) => {
             el.textContent = title;
@@ -2150,6 +2194,22 @@
         updatePlayButtons();
         if (!(document.hidden && !audio.paused)) updateCoverTheme(cover);
         updateMediaSessionPlaybackState();
+    }
+
+    function setPlayerCover(img, cover, song) {
+        if (!img) return;
+        const target = normalizeCoverUrl(cover) || fallbackCover;
+        img.onerror = () => {
+            img.onerror = null;
+            img.src = fallbackCover;
+            if (song?.cover_url && normalizeCoverUrl(song.cover_url) === target) {
+                song.cover_url = '';
+                const queueSong = state.queue[state.currentIndex];
+                if (queueSong && sameSong(queueSong, song)) queueSong.cover_url = '';
+                updateMediaSessionMetadata({ afterPlaybackStart: !audio.paused });
+            }
+        };
+        img.src = target;
     }
 
     function updatePlayButtons() {
@@ -2688,6 +2748,7 @@
 
     function renderLyrics() {
         state.activeLyricIndex = -1;
+        els.lyricBox.classList.toggle('is-empty', state.lyrics.length === 0);
         els.lyricBox.innerHTML = state.lyrics.length
             ? state.lyrics.map((line, index) => `
                 <div class="lyric-line" data-lyric-index="${index}">
@@ -3015,8 +3076,8 @@
         return Boolean(musiqRuntime.canUseFullMediaSession?.()
             || (musiqRuntime.hasMediaSession
                 && musiqRuntime.isSecureContext
-                && musiqRuntime.isStandalonePwa
-                && !musiqRuntime.isInAppBrowser));
+                && !musiqRuntime.isInAppBrowser
+                && (musiqRuntime.isStandalonePwa || !musiqRuntime.isIOS)));
     }
 
     function mediaSessionUnavailableReason() {
@@ -3050,29 +3111,22 @@
 
     function buildArtworkSet(src) {
         const artwork = absolutizeAssetUrl(src || fallbackArtwork);
-        const type = /\.jpe?g(?:$|\?)/i.test(artwork) ? 'image/jpeg' : 'image/png';
-        return [
-            { src: artwork, sizes: '96x96', type },
-            { src: artwork, sizes: '192x192', type },
-            { src: artwork, sizes: '512x512', type }
-        ];
+        return mediaArtwork?.buildSet(artwork, { fallback: fallbackArtwork }) || [{ src: artwork }];
     }
 
     function chooseMediaArtwork(song) {
         const candidate = absolutizeAssetUrl(song.cover_url || getCoverUrl(song, 512) || fallbackArtwork);
         const fallback = absolutizeAssetUrl(fallbackArtwork);
-        try {
-            const url = new URL(candidate, window.location.href);
-            if (url.origin === window.location.origin || ['data:', 'blob:'].includes(url.protocol)) return candidate;
-            return candidate || fallback;
-        } catch {
-            return fallback;
-        }
+        return mediaArtwork?.resolve(candidate, { fallback }) || fallback;
     }
 
     function absolutizeAssetUrl(value) {
         try {
-            return new URL(value || fallbackCover, window.location.href).href;
+            const url = new URL(normalizeCoverUrl(value) || fallbackCover, window.location.href);
+            if (window.location.protocol === 'https:' && url.protocol === 'http:') {
+                return new URL(fallbackArtwork, window.location.href).href;
+            }
+            return url.href;
         } catch {
             return fallbackCover;
         }
@@ -3264,7 +3318,10 @@
             },
             canUseFullMediaSession() {
                 this.refresh();
-                return Boolean(this.hasMediaSession && this.isSecureContext && this.isStandalonePwa && !this.isInAppBrowser);
+                return Boolean(this.hasMediaSession
+                    && this.isSecureContext
+                    && !this.isInAppBrowser
+                    && (this.isStandalonePwa || !this.isIOS));
             },
             clearMediaSession(reason = '') {
                 this.mediaSessionEnabled = false;
@@ -3281,7 +3338,7 @@
             markRouteRestore() {
                 this.lastRouteRestoreTime = new Date().toISOString();
             },
-            appVersion: '2026.05.31.2',
+            appVersion: '2026.07.10.6',
             mediaSessionEnabled: false,
             mediaSessionBlockedReason: ''
         };
@@ -3354,7 +3411,8 @@
 
     async function apiGetWithMeta(path, params = {}) {
         const response = await fetch(buildApiUrl(path, params), {
-            credentials: runtimeConfig.credentials
+            credentials: runtimeConfig.credentials,
+            cache: 'no-store'
         });
         const data = await parseResponse(response);
         return {
@@ -3404,8 +3462,13 @@
             name: song.name || song.song_name || song.song_title || song.title || '未知歌曲',
             artist: song.artist || song.song_artist || [],
             album: song.album || '',
+            duration: Number(song.duration || 0),
             pic_id: String(song.pic_id || song.pic || song.song_cover || ''),
-            cover_url: song.cover_url || song.cover || '',
+            cover_url: normalizeCoverUrl(
+                song.cover_url
+                || song.cover
+                || (/^https?:\/\//.test(String(song.pic || '')) ? song.pic : '')
+            ),
             source,
             url_id: String(song.url_id || song.id || ''),
             lyric_id: String(song.lyric_id || song.id || ''),
@@ -3467,16 +3530,16 @@
 
     function getCoverUrl(song, size = 300) {
         if (!song?.pic_id) return fallbackCover;
-        if (song.cover_url) return song.cover_url;
-        if (/^https?:\/\//.test(song.pic_id) || song.pic_id.startsWith('uploads/')) return song.pic_id;
+        if (song.cover_url) return normalizeCoverUrl(song.cover_url);
+        if (/^https?:\/\//.test(song.pic_id) || song.pic_id.startsWith('uploads/')) return normalizeCoverUrl(song.pic_id);
         return fallbackCover;
     }
 
     async function resolveCoverUrl(song, size = 300) {
         if (!song) return fallbackCover;
-        if (song.cover_url) return song.cover_url;
+        if (song.cover_url) return normalizeCoverUrl(song.cover_url);
         if (!song.pic_id) return fallbackCover;
-        if (/^https?:\/\//.test(song.pic_id) || song.pic_id.startsWith('uploads/')) return song.pic_id;
+        if (/^https?:\/\//.test(song.pic_id) || song.pic_id.startsWith('uploads/')) return normalizeCoverUrl(song.pic_id);
         try {
             const data = await apiGet('api.php', {
                 types: 'pic',
@@ -3484,10 +3547,16 @@
                 id: song.pic_id,
                 size
             });
-            return data.url || fallbackCover;
+            return normalizeCoverUrl(data.url) || fallbackCover;
         } catch {
             return fallbackCover;
         }
+    }
+
+    function normalizeCoverUrl(value) {
+        return String(value || '')
+            .replace(/^http:\/\/(img\d+)\.sycdn\.kuwo\.cn\//i, 'https://$1.kuwo.cn/')
+            .replace(/^http:\/\/(img\d+)\.kuwo\.cn\//i, 'https://$1.kuwo.cn/');
     }
 
     function formatArtists(artist) {

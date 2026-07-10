@@ -5,10 +5,11 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const sharp = require('sharp');
 const test = require('node:test');
 
 const { createDataStore, generateToken, hashPassword } = require('../src/server/database');
-const { createExpressApp } = require('../src/server/index');
+const { createExpressApp, processArtworkImage } = require('../src/server/index');
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'music-auth-test-'));
@@ -30,7 +31,7 @@ function listen(server) {
   });
 }
 
-async function startAuthApp() {
+async function startAuthApp(appOptions = {}) {
   const dataDir = createTempDir();
   const uploadsDir = path.join(dataDir, 'uploads', 'avatars');
   const cacheDir = path.join(dataDir, 'cache');
@@ -42,10 +43,14 @@ async function startAuthApp() {
     uploadsDir,
     cacheDir,
     dispatcher: {
+      async search() {
+        return [{ id: 'cache-test', name: '缓存测试', artist: 'music', source: 'netease' }];
+      },
       async proxy() {
         throw new Error('music provider should not be called during auth tests');
       }
-    }
+    },
+    ...appOptions
   });
   const server = http.createServer(app);
   const baseUrl = await listen(server);
@@ -349,4 +354,74 @@ test('CORS is closed by default for arbitrary origins', async () => {
   } finally {
     closeAuthApp(ctx);
   }
+});
+
+test('music API responses disable browser caches while retaining server-side caching', async () => {
+  let ctx;
+  try {
+    ctx = await startAuthApp();
+    const response = await fetch(`${ctx.baseUrl}/api.php?types=search&source=netease&name=cache-test&count=1`);
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(response.headers.get('pragma'), 'no-cache');
+    assert.equal(response.headers.get('x-cache'), 'MISS');
+  } finally {
+    closeAuthApp(ctx);
+  }
+});
+
+test('media artwork proxy serves allowlisted images and blocks arbitrary hosts', async () => {
+  let ctx;
+  let fetchCount = 0;
+  try {
+    ctx = await startAuthApp({
+      artworkFetcher: async (target) => {
+        fetchCount += 1;
+        assert.equal(target.hostname, 'img2.kuwo.cn');
+        return { data: Buffer.from([0xff, 0xd8, 0xff, 0xd9]), contentType: 'image/jpeg' };
+      },
+      artworkProcessor: async (image) => image
+    });
+
+    const allowedTarget = encodeURIComponent('https://img2.kuwo.cn/wmvpic/cover.jpg');
+    const allowed = await fetch(`${ctx.baseUrl}/media/artwork?url=${allowedTarget}`);
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get('content-type'), 'image/jpeg');
+    assert.match(allowed.headers.get('cache-control') || '', /max-age=86400/);
+    assert.equal((await allowed.arrayBuffer()).byteLength, 4);
+    assert.equal(fetchCount, 1);
+
+    const cached = await fetch(`${ctx.baseUrl}/media/artwork?url=${allowedTarget}`, {
+      headers: { 'If-None-Match': allowed.headers.get('etag') }
+    });
+    assert.equal(cached.status, 304);
+    assert.equal(fetchCount, 1);
+
+    const blockedTarget = encodeURIComponent('http://127.0.0.1/private-cover.jpg');
+    const blocked = await fetch(`${ctx.baseUrl}/media/artwork?url=${blockedTarget}`);
+    assert.equal(blocked.status, 400);
+    assert.equal(fetchCount, 1);
+  } finally {
+    closeAuthApp(ctx);
+  }
+});
+
+test('media artwork processor emits a square 512px JPEG for system controls', async () => {
+  const source = await sharp({
+    create: {
+      width: 324,
+      height: 182,
+      channels: 3,
+      background: { r: 40, g: 120, b: 200 }
+    }
+  }).jpeg().toBuffer();
+
+  const result = await processArtworkImage({ data: source, contentType: 'image/jpeg' });
+  const metadata = await sharp(result.data).metadata();
+
+  assert.equal(result.contentType, 'image/jpeg');
+  assert.equal(metadata.width, 512);
+  assert.equal(metadata.height, 512);
+  assert.equal(metadata.format, 'jpeg');
 });

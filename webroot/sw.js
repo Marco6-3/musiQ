@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'music-pwa-v29';
+const CACHE_VERSION = 'music-pwa-v38';
 const APP_SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 const LEGACY_CACHE_PREFIXES = ['musiq-pwa-'];
@@ -11,11 +11,12 @@ const APP_SHELL = [
   './offline.html',
   './manifest.webmanifest',
   './?source=pwa',
-  './css/style.css?v=2.1.9',
-  './js/pwa-runtime.js?v=1.0.4',
-  './js/main.js?v=2.2.18',
+  './css/style.css?v=2.1.13',
+  './js/pwa-runtime.js?v=1.0.10',
+  './js/media-session-artwork.js?v=1.0.1',
+  './js/main.js?v=2.2.26',
   './js/source-selector.js?v=1.0.4',
-  './js/pwa.js?v=1.1.3',
+  './js/pwa.js?v=1.1.9',
   './public/music-default.png',
   './public/icons/icon-192.png',
   './public/icons/apple-touch-icon-180.png',
@@ -96,7 +97,7 @@ function isAudioRequest(url) {
 
 async function networkFirstApi(request) {
   try {
-    return await fetch(request);
+    return await fetch(request, { cache: 'no-store' });
   } catch {
     return jsonResponse({
       success: false,

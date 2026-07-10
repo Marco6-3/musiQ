@@ -69,9 +69,10 @@
   "dependencies": {
     "@meting/core": "^1.6.1",
     "@unblockneteasemusic/server": "^0.28.0",
-    "axios": "^1.13.2",
+    "axios": "^1.18.1",
     "express": "^5.2.1",
-    "multer": "^2.0.2",
+    "multer": "^2.2.0",
+    "sharp": "^0.34.5",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {

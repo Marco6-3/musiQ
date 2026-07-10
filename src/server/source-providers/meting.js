@@ -76,15 +76,25 @@ class MetingProvider extends BaseProvider {
   }
 
   async pic(song, size = 300) {
-    const meting = await this._ensureMeting(song.source);
+    const platform = song?.source || this.defaultPlatform;
+    const pictureId = String(song?.pic_id || song?.id || '').trim();
+    // @meting/core's Kugou artwork path dereferences a missing imgUrl for
+    // unavailable tracks. KugouDirectProvider owns this source and can fail
+    // cleanly without turning an ordinary missing cover into an exception.
+    if (!pictureId || platform === 'kugou') return null;
+    const meting = await this._ensureMeting(platform);
     if (!meting) return null;
-    const result = await meting.pic(song.pic_id, size);
+    const result = await meting.pic(pictureId, size);
     const data = parseMetingJson(result, 'pic');
     return { url: data?.url };
   }
 
   async proxy(types, params) {
+    params = params || {};
     const platform = params.source || this.defaultPlatform;
+    const resourceId = String(params.id || '').trim();
+    if (['url', 'lyric', 'pic'].includes(types) && !resourceId) return null;
+    if (types === 'pic' && platform === 'kugou') return null;
     const meting = await this._ensureMeting(platform);
     if (!meting) return null;
 
@@ -94,17 +104,17 @@ class MetingProvider extends BaseProvider {
         return { data: JSON.stringify(list), contentType: 'application/json' };
       }
       if (types === 'url') {
-        const result = await meting.url(params.id, Number(params.br) || 320);
+        const result = await meting.url(resourceId, Number(params.br) || 320);
         const data = parseMetingJson(result, 'proxy:url');
         return { data: JSON.stringify({ url: data?.url, br: Number(params.br) || 320 }), contentType: 'application/json' };
       }
       if (types === 'lyric') {
-        const result = await meting.lyric(params.id);
+        const result = await meting.lyric(resourceId);
         const data = parseMetingJson(result, 'proxy:lyric');
         return { data: JSON.stringify({ lyric: data?.lyric || data?.lrc?.lyric || '' }), contentType: 'application/json' };
       }
       if (types === 'pic') {
-        const result = await meting.pic(params.id, Number(params.size) || 300);
+        const result = await meting.pic(resourceId, Number(params.size) || 300);
         const data = parseMetingJson(result, 'proxy:pic');
         return { data: JSON.stringify({ url: data?.url }), contentType: 'application/json' };
       }

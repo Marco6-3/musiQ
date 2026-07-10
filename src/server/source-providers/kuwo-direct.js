@@ -102,7 +102,7 @@ class KuwoDirectProvider extends BaseProvider {
       album: this._decodeHtmlEntity(item.ALBUM || ''),
       source: 'kuwo',
       duration: Number(item.DURATION || 0) * 1000,
-      pic: item.IMG || item.hts_MVPIC || (item.web_albumpic_short ? `https://img4.kuwo.cn/star/albumcover/${item.web_albumpic_short}` : ''),
+      pic: normalizeKuwoImageUrl(item.IMG || item.hts_MVPIC || (item.web_albumpic_short ? `https://img4.kuwo.cn/star/albumcover/${item.web_albumpic_short}` : '')),
     };
   }
 
@@ -259,6 +259,12 @@ class KuwoDirectProvider extends BaseProvider {
     }
     return null;
   }
+}
+
+function normalizeKuwoImageUrl(value) {
+  return String(value || '')
+    .replace(/^http:\/\/(img\d+)\.sycdn\.kuwo\.cn\//i, 'https://$1.kuwo.cn/')
+    .replace(/^http:\/\/(img\d+)\.kuwo\.cn\//i, 'https://$1.kuwo.cn/');
 }
 
 module.exports = { KuwoDirectProvider };
