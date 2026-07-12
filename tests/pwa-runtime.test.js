@@ -59,13 +59,22 @@ test('desktop secure browsers enable Media Session without requiring PWA install
   assert.equal(runtime.canUseFullMediaSession(), true);
 });
 
-test('iPhone Safari reserves full Media Session for the standalone PWA', () => {
+test('iPhone Safari keeps full Media Session in browser and standalone PWA modes', () => {
   const userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1';
   const browserRuntime = createRuntime({ userAgent });
   const standaloneRuntime = createRuntime({ userAgent, standalone: true });
 
-  assert.equal(browserRuntime.canUseFullMediaSession(), false);
+  assert.equal(browserRuntime.canUseFullMediaSession(), true);
   assert.equal(standaloneRuntime.canUseFullMediaSession(), true);
+});
+
+test('non-Safari iOS browsers do not claim the full Safari Media Session path', () => {
+  const runtime = createRuntime({
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/150.0 Mobile/15E148 Safari/604.1'
+  });
+
+  assert.equal(runtime.isSafari, false);
+  assert.equal(runtime.canUseFullMediaSession(), false);
 });
 
 test('iOS in-app browsers never enable playback Media Session handlers', () => {
@@ -82,4 +91,8 @@ test('background playback throttles hidden UI work without disabling track prefe
   assert.match(mainSource, /now - state\.lastBackgroundTickAt < 5000/);
   assert.match(mainSource, /musiqRuntime\.isIOS\s*&& musiqRuntime\.isStandalonePwa/);
   assert.doesNotMatch(mainSource, /document\.hidden && !backgroundPlaybackNeedsPrefetch/);
+  assert.match(mainSource, /scheduleLifecyclePlaybackRecovery\('hidden'\)/);
+  assert.match(mainSource, /scheduleLifecyclePlaybackRecovery\('visible'\)/);
+  assert.match(mainSource, /state\.playbackIntent/);
+  assert.doesNotMatch(mainSource, /else if \(audio\.paused\) \{\s*clearOrDegradeMediaSession\('hidden-paused'\)/);
 });

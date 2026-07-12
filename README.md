@@ -127,9 +127,9 @@ $env:MUSIC_CORS_ORIGIN="https://你的前端域名"
 - iOS 自动播放受浏览器限制，首次播放必须来自用户点按；如果 Safari 丢失用户手势，界面会提示再次点按播放。
 - 后台播放、锁屏信息和控制中心按钮受 iOS / Safari 版本和系统策略限制，代码只做 feature detection，不承诺所有设备一致可用。
 - 支付宝、微信、QQ、钉钉等 iOS 内置浏览器会被识别为不适合播放的宿主，页面可以浏览，但点击播放会被阻止并提示复制链接到 Safari。
-- iPhone 普通 Safari 不注册完整 Media Session action handlers；只有 HTTPS 主屏幕 PWA 会完整启用播放、暂停、上一首、下一首和 seekto handlers。macOS 等桌面安全上下文会直接启用系统媒体键与 Media Session。
+- iPhone 普通 Safari 与 HTTPS 主屏幕 PWA 都会启用 Media Session 的播放、暂停、上一首、下一首和 seekto handlers；页面上划进入后台时保留 metadata 与系统恢复入口。支付宝、微信等内置浏览器仍不会启用这些 handlers。
 - 系统媒体封面使用同源 `/media/artwork` 代理，经过音乐 CDN 白名单、图片类型/大小校验，并统一生成缓存的 512×512 JPEG，避免第三方 CDN、错误 MIME 或横图导致锁屏/灵动岛拒绝封面。
-- 页面隐藏时只降低不可见的进度 DOM 更新和视觉合成频率；音频解码、音质、下一首预取、Media Session 控制和播放故障恢复保持启用，不以增加切歌延迟换取省电。
+- 页面隐藏时只降低不可见的进度 DOM 更新和视觉合成频率；音频解码、音质、下一首预取、Media Session 控制和播放故障恢复保持启用。iPhone 生命周期恢复采用隐藏/返回事件触发的一次性检查，不运行常驻轮询，也不以增加切歌延迟换取省电。
 - 主屏幕 PWA 和 Service Worker 需要 HTTPS；`localhost` 仅适合桌面开发。
 
 ### Agent 歌单助手

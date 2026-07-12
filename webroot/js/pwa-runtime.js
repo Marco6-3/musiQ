@@ -15,7 +15,7 @@
     ];
     const NON_SAFARI_PATTERNS = /CriOS|FxiOS|EdgiOS|OPiOS|Chrome|Chromium|Android/i;
     const MEDIA_ACTIONS = ['play', 'pause', 'previoustrack', 'nexttrack', 'seekto', 'seekbackward', 'seekforward', 'stop'];
-    const APP_VERSION = '2026.07.10.6';
+    const APP_VERSION = '2026.07.12.1';
     const CLASS_MAP = {
         isIOS: 'is-ios',
         isStandalonePwa: 'is-standalone-pwa',
@@ -119,7 +119,7 @@
         return Boolean(runtime.hasMediaSession
             && runtime.isSecureContext
             && !runtime.isInAppBrowser
-            && (runtime.isStandalonePwa || !runtime.isIOS));
+            && (runtime.isStandalonePwa || runtime.isSafari || !runtime.isIOS));
     }
 
     function isPlaybackBlocked() {
