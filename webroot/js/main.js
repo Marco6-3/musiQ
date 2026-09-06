@@ -55,6 +55,7 @@
         stallTimer: 0,
         qualityRetryLevel: 0,
         currentQuality: '999',
+        currentAudioMetadata: null,
         recentPlays: [],
         weeklyFavorites: [],
         historyLoading: false,
@@ -1321,6 +1322,7 @@
         }
         state.currentSong = normalizeSong(song);
         state.qualityRetryLevel = 0;
+        state.currentAudioMetadata = null;
         state.currentQuality = normalizeRequestedQuality(els.qualitySelect.value);
         state.lyrics = [];
         state.activeLyricIndex = -1;
@@ -2935,6 +2937,8 @@
     }
 
     function updateQualityBadge(data) {
+        if (data) state.currentAudioMetadata = data;
+        data = data || state.currentAudioMetadata;
         if (!els.expandedQuality) return;
         const quality = String(data?.br || state.currentQuality || els.qualitySelect.value || '999');
         const size = Number(data?.size || 0);

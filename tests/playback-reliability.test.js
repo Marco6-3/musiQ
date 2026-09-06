@@ -165,3 +165,20 @@ test('a stream recovery resolving after a song change cannot overwrite the new a
   resolve({url:'old-song',br:999}); await pending;
   assert.equal(audio.src, 'new-song'); assert.equal(state.recoveryRequestId, null);
 });
+
+test('quality badge keeps verified metadata when the shell redraws without a new URL', () => {
+  const source = fs.readFileSync(require.resolve('../webroot/js/main.js'), 'utf8');
+  const start = source.indexOf('    function updateQualityBadge(');
+  const end = source.indexOf('    function normalizeRequestedQuality(', start);
+  const state = { currentQuality: '999', currentAudioMetadata: null };
+  const label = {};
+  const update = vm.runInNewContext(source.slice(start, end) + '; updateQualityBadge', {
+    state, els: { expandedQuality: label, qualitySelect: {value:'999'} },
+    qualityLabel: (quality, data) => data?.verified_audio && data.lossless ? 'verified lossless' : 'unknown',
+    formatBytes: () => ''
+  });
+  update({br:999,verified_audio:true,lossless:true}); update();
+  assert.equal(label.textContent, 'verified lossless');
+  state.currentAudioMetadata = null; update();
+  assert.equal(label.textContent, 'unknown');
+});

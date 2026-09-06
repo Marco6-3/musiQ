@@ -2498,3 +2498,29 @@ select option { color: #f5f5f7; background: #25252b; }
     .player-dock { left: max(10px, var(--safe-left)); right: max(10px, var(--safe-right)); bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 8px); min-height: var(--mobile-player-height); border: 1px solid #393940; border-radius: 12px; padding-inline: 10px; background: #26262c; }
     .search-form input { min-width: 0; font-size: 16px; }
 }
+
+/* Keep labels visible in the compact desktop sidebar. */
+@media (min-width: 761px) and (max-width: 1020px) {
+    .nav-item, .nav-item:not(.active) { font-size: 14px; justify-content: flex-start; padding: 0 12px; }
+}
+
+/* Visual QA: leave enough width for mobile track information. */
+@media (max-width: 760px) {
+    .dock-song { gap: 8px; }
+    .dock-song img { width: 44px; height: 44px; flex-basis: 44px; }
+    .dock-song div { display: grid; gap: 4px; flex: 1; align-content: center; }
+    .dock-song strong { width: 100%; max-width: none; font-size: 14px; line-height: 1.35; }
+    #dock-artist { width: 100%; font-size: 12px; line-height: 1.35; }
+    #dock-artist::before { content: none; }
+    .control-row { gap: 3px; }
+}
+@media (max-width: 360px) {
+    .player-dock #favorite-btn { display: none; }
+}
+@media (max-width: 760px) {
+    .auth-card { padding-top: 60px; }
+}
+@media (max-width: 360px) {
+    .feature-card h2 { font-size: 24px; max-width: 100%; }
+    .feature-card p { max-width: 86%; }
+}
