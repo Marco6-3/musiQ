@@ -102,6 +102,7 @@ const PROTECTED_USER_ENDPOINTS = new Set([
   '/php/get_playlist_id.php',
   '/php/rename_playlist.php',
   '/php/sync_playlists.php',
+  '/php/offline_track.php',
   '/php/agent_assistant.php',
   '/php/play_history.php'
 ]);
@@ -201,7 +202,10 @@ async function startLocalBackend({ preferredPort = 41731, host, dataDir, musicSo
   const store = await createDataStore(resolvedDataDir, { migrateFromDataDir });
   const dispatcher = createDefaultDispatcher(musicSourceConfig || musicSources);
   const offlineCache = new OfflineMusicCache({ db: store.db, dataDir: resolvedDataDir, dispatcher });
-  offlineCache.scheduleSync(500);
+  const removedAutomaticTracks = await offlineCache.removeUnrequestedTracks();
+  if (removedAutomaticTracks > 0) {
+    console.log(`[offline-cache] removed ${removedAutomaticTracks} legacy automatic download(s)`);
+  }
   // Repair stale metadata (wrong content_type / br) from previous downloads.
   offlineCache.repairMetadata().catch((err) => {
     console.warn('[offline-cache] metadata repair failed:', err.message);
@@ -365,16 +369,22 @@ function createExpressApp({
   app.post('/php/favorite.php', parseForm, requireUserAuth(db), (req, res) => handleFavorite(db, req, res));
   app.post('/php/get_favorites.php', parseForm, requireUserAuth(db), (req, res) => handleGetFavorites(db, req, res));
   app.post('/php/sync_favorites.php', parseForm, requireUserAuth(db), (req, res) => handleSyncFavorites(db, req, res));
-  app.post('/php/sync_bundle.php', parseForm, requireUserAuth(db), (req, res) => handleSyncBundle(db, req, res, offlineCache));
-  app.post('/php/playlist.php', parseForm, requireUserAuth(db), (req, res) => handlePlaylist(db, req, res, offlineCache));
+  app.post('/php/sync_bundle.php', parseForm, requireUserAuth(db), (req, res) => handleSyncBundle(db, req, res));
+  app.post('/php/playlist.php', parseForm, requireUserAuth(db), (req, res) => handlePlaylist(db, req, res));
   app.post('/php/get_playlists.php', parseForm, requireUserAuth(db), (req, res) => handleGetPlaylists(db, req, res));
   app.post('/php/get_playlist_id.php', parseForm, requireUserAuth(db), (req, res) => handleGetPlaylistId(db, req, res));
   app.post('/php/rename_playlist.php', parseForm, requireUserAuth(db), (req, res) => handleRenamePlaylist(db, req, res));
-  app.post('/php/sync_playlists.php', parseForm, requireUserAuth(db), (req, res) => handleSyncPlaylists(db, req, res, offlineCache));
+  app.post('/php/sync_playlists.php', parseForm, requireUserAuth(db), (req, res) => handleSyncPlaylists(db, req, res));
+  app.post('/php/offline_track.php', parseForm, requireUserAuth(db), async (req, res, next) => {
+    try {
+      await handleOfflineTrack(db, req, res, offlineCache);
+    } catch (error) {
+      next(error);
+    }
+  });
   app.post('/php/agent_assistant.php', parseForm, requireUserAuth(db), (req, res, next) => {
     handleAgentAssistant(db, req, res, {
       dispatcher,
-      offlineCache,
       agentModelClient,
       agentConfigResolver,
       agentUsagePolicy
@@ -1059,7 +1069,7 @@ function handleSyncFavorites(db, req, res) {
   return res.json({ success: true, message: '收藏同步成功' });
 }
 
-function handleSyncBundle(db, req, res, offlineCache) {
+function handleSyncBundle(db, req, res) {
   const userId = Number(req.body.user_id || 0);
   if (!userId) return res.json({ success: false, message: '缺少用户ID' });
 
@@ -1070,7 +1080,6 @@ function handleSyncBundle(db, req, res, offlineCache) {
 
   const mode = stringValue(req.body.mode || req.body.action || 'merge') === 'replace' ? 'replace' : 'merge';
   const synced = syncUserData(db, userId, payload, { mode });
-  scheduleOfflineSync(offlineCache);
   return res.json({
     success: true,
     message: mode === 'replace' ? '云端数据已替换' : '云端数据已合并',
@@ -1081,7 +1090,7 @@ function handleSyncBundle(db, req, res, offlineCache) {
   });
 }
 
-function handlePlaylist(db, req, res, offlineCache) {
+function handlePlaylist(db, req, res) {
   const userId = Number(req.body.user_id || 0);
   const action = stringValue(req.body.action);
   if (!userId) return res.json({ success: false, message: '缺少用户ID' });
@@ -1099,7 +1108,6 @@ function handlePlaylist(db, req, res, offlineCache) {
     if (!playlistId || !song.id) return res.json({ success: false, message: '缺少必要参数' });
     if (!ownsPlaylist(db, userId, playlistId)) return res.json({ success: false, message: '歌单不存在' });
     insertPlaylistSong(db, playlistId, song);
-    scheduleOfflineSync(offlineCache);
     return res.json({ success: true, message: '已添加到歌单' });
   }
 
@@ -1109,7 +1117,6 @@ function handlePlaylist(db, req, res, offlineCache) {
     const source = stringValue(req.body.source || 'netease');
     if (!ownsPlaylist(db, userId, playlistId)) return res.json({ success: false, message: '歌单不存在' });
     db.prepare('DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ? AND source = ?').run(playlistId, songId, source);
-    scheduleOfflineSync(offlineCache);
     return res.json({ success: true, message: '已从歌单移除' });
   }
 
@@ -1121,7 +1128,6 @@ function handlePlaylist(db, req, res, offlineCache) {
       db.prepare('DELETE FROM playlists WHERE id = ? AND user_id = ?').run(playlistId, userId);
     });
     deletePlaylist();
-    scheduleOfflineSync(offlineCache);
     return res.json({ success: true, message: '歌单已删除' });
   }
 
@@ -1155,7 +1161,6 @@ function handlePlaylist(db, req, res, offlineCache) {
       }
     });
     update();
-    scheduleOfflineSync(offlineCache);
     return res.json({ success: true, message: '歌曲导入成功' });
   }
 
@@ -1190,7 +1195,7 @@ function handleRenamePlaylist(db, req, res) {
   return res.json({ success: true, message: '歌单已重命名' });
 }
 
-function handleSyncPlaylists(db, req, res, offlineCache) {
+function handleSyncPlaylists(db, req, res) {
   const userId = Number(req.body.user_id || 0);
   if (!userId) return res.json({ success: false, message: '缺少用户ID' });
 
@@ -1211,8 +1216,26 @@ function handleSyncPlaylists(db, req, res, offlineCache) {
     }
   });
   sync();
-  scheduleOfflineSync(offlineCache);
   return res.json({ success: true, message: '歌单同步成功' });
+}
+
+async function handleOfflineTrack(db, req, res, offlineCache) {
+  const userId = Number(req.body.user_id || 0);
+  const action = stringValue(req.body.action || 'download');
+  if (!userId) return res.json({ success: false, message: '缺少用户ID' });
+  if (action !== 'download') return res.json({ success: false, message: '未知操作' });
+  if (!offlineCache) return res.status(503).json({ success: false, message: '离线下载未启用' });
+
+  const song = songFromBody(req.body);
+  if (!song.id) return res.json({ success: false, message: '缺少歌曲ID' });
+
+  const result = await offlineCache.requestDownload(song);
+  return res.status(result.queued ? 202 : 200).json({
+    success: true,
+    status: result.queued ? 'pending' : 'downloaded',
+    cache_key: result.track?.cache_key || '',
+    message: result.queued ? '已开始下载' : '歌曲已下载'
+  });
 }
 
 async function handleToplist(req, res, cacheDir, dispatcher) {
@@ -1511,7 +1534,7 @@ async function handleOfflineAudio(req, res, offlineCache, options = {}) {
 
   const key = stringValue(req.params.key);
   const track = offlineCache.getTrackByKey(key);
-  if (!track || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
+  if (!track?.user_requested || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
     return res.status(404).json({ success: false, message: '离线音频不存在' });
   }
 
@@ -2052,10 +2075,6 @@ async function pruneCacheDirAsync(cacheDir, opts) {
 
 function ownsPlaylist(db, userId, playlistId) {
   return Boolean(db.prepare('SELECT id FROM playlists WHERE id = ? AND user_id = ?').get(playlistId, userId));
-}
-
-function scheduleOfflineSync(offlineCache) {
-  if (offlineCache) offlineCache.scheduleSync();
 }
 
 function parseRangeHeader(range, size) {

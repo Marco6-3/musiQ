@@ -80,7 +80,7 @@ async function waitFor(predicate, timeoutMs = 3000) {
   throw new Error('timed out waiting for condition');
 }
 
-test('offline cache downloads playlist songs and deletes unreferenced files', async () => {
+test('playlist songs stay online until the user explicitly requests a download', async () => {
   const dataDir = createTempDir();
   const audioServer = await startAudioServer();
   let store;
@@ -99,8 +99,10 @@ test('offline cache downloads playlist songs and deletes unreferenced files', as
       pic_id: ''
     });
 
+    let dispatcherCalls = 0;
     const dispatcher = {
       async proxy(types, params) {
+        dispatcherCalls += 1;
         assert.equal(types, 'url');
         assert.equal(params.br, '999');
         return {
@@ -111,18 +113,28 @@ test('offline cache downloads playlist songs and deletes unreferenced files', as
       }
     };
     cache = new OfflineMusicCache({ db: store.db, dataDir, dispatcher, minBytes: 1 });
-    await cache.syncAll();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.equal(dispatcherCalls, 0);
+    assert.equal(cache.getTrack('netease', 'song-1'), undefined);
+
+    await cache.requestDownload({
+      id: 'song-1',
+      source: 'netease',
+      name: 'Song 1',
+      artist: 'Artist'
+    });
 
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-1'));
+    assert.equal(dispatcherCalls, 1);
     assert.equal(downloaded.status, 'downloaded');
+    assert.equal(downloaded.user_requested, 1);
     assert.ok(fs.existsSync(downloaded.file_path));
     assert.equal(fs.readFileSync(downloaded.file_path, 'utf8'), 'fake-audio-content');
 
     store.db.prepare('DELETE FROM playlist_songs WHERE playlist_id = ?').run(playlist.id);
-    await cache.syncAll();
-
-    assert.equal(cache.getTrack('netease', 'song-1'), undefined);
-    assert.equal(fs.existsSync(downloaded.file_path), false);
+    assert.equal(cache.getPlayableTrack('netease', 'song-1').status, 'downloaded');
+    assert.equal(fs.existsSync(downloaded.file_path), true);
   } finally {
     if (cache) cache.close();
     if (store) store.close();
@@ -162,7 +174,13 @@ test('offline cache rejects tiny audio files instead of caching ad snippets', as
       }
     });
 
-    await cache.syncAll();
+    await cache.requestDownload({
+      id: 'tiny-song',
+      source: 'kuwo',
+      name: '刚好遇见你',
+      artist: '李玉刚',
+      album: '刚好遇见你'
+    });
     const failed = await waitFor(() => {
       const row = store.db.prepare('SELECT status, error FROM offline_tracks WHERE song_id = ?').get('tiny-song');
       return row?.status === 'error' ? row : null;
@@ -192,8 +210,8 @@ test('offline cache ignores existing tiny downloaded files and marks them invali
 
     store.db.prepare(`
       INSERT INTO offline_tracks
-        (cache_key, song_id, source, name, artist, status, file_path, content_type, br, size, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'downloaded', ?, 'audio/mpeg', 999, ?, strftime('%s', 'now'))
+        (cache_key, song_id, source, name, artist, status, file_path, content_type, br, size, user_requested, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'downloaded', ?, 'audio/mpeg', 999, ?, 1, strftime('%s', 'now'))
     `).run(key, 'bad-existing', 'kuwo', 'Bad Existing', 'Artist', filePath, fs.statSync(filePath).size);
 
     assert.equal(cache.getPlayableTrack('kuwo', 'bad-existing'), null);
@@ -203,6 +221,34 @@ test('offline cache ignores existing tiny downloaded files and marks them invali
   } finally {
     if (cache) cache.close();
     if (store) await store.close();
+    removeTempDir(dataDir);
+  }
+});
+
+test('legacy playlist-driven cache files are removed during the explicit-download upgrade', async () => {
+  const dataDir = createTempDir();
+  let store;
+  let cache;
+
+  try {
+    store = await createDataStore(dataDir);
+    cache = new OfflineMusicCache({ db: store.db, dataDir, dispatcher: { async proxy() { return null; } } });
+    const key = cacheKey('netease', 'legacy-auto');
+    const filePath = path.join(cache.audioDir, `${key}.mp3`);
+    fs.writeFileSync(filePath, Buffer.from('legacy automatic cache'));
+    store.db.prepare(`
+      INSERT INTO offline_tracks
+        (cache_key, song_id, source, name, status, file_path, content_type, br, size, updated_at)
+      VALUES (?, ?, ?, ?, 'downloaded', ?, 'audio/mpeg', 999, ?, strftime('%s', 'now'))
+    `).run(key, 'legacy-auto', 'netease', 'Legacy Auto', filePath, fs.statSync(filePath).size);
+
+    assert.equal(cache.getPlayableTrack('netease', 'legacy-auto'), null);
+    assert.equal(await cache.removeUnrequestedTracks(), 1);
+    assert.equal(cache.getTrack('netease', 'legacy-auto'), undefined);
+    assert.equal(fs.existsSync(filePath), false);
+  } finally {
+    if (cache) cache.close();
+    if (store) store.close();
     removeTempDir(dataDir);
   }
 });
@@ -235,7 +281,12 @@ test('music API returns local offline URL when the track is downloaded', async (
         }
       }
     });
-    await cache.syncAll();
+    await cache.requestDownload({
+      id: 'song-2',
+      source: 'netease',
+      name: 'Song 2',
+      artist: 'Artist'
+    });
     await waitFor(() => cache.getPlayableTrack('netease', 'song-2'));
 
     const app = createExpressApp({
@@ -473,7 +524,7 @@ test('music API does not trust a FLAC extension when the audio probe fails', asy
   }
 });
 
-test('server account playlists trigger offline download and are available after login', async () => {
+test('adding to a server playlist does not download until the protected download action is requested', async () => {
   const dataDir = createTempDir();
   const audioServer = await startAudioServer({
     audio: Buffer.from('server-account-audio-content'),
@@ -483,6 +534,7 @@ test('server account playlists trigger offline download and are available after 
   let store;
   let cache;
   let appServer;
+  let downloadRequests = 0;
 
   try {
     store = await createDataStore(dataDir);
@@ -495,6 +547,7 @@ test('server account playlists trigger offline download and are available after 
       minBytes: 1,
       dispatcher: {
         async proxy(types, params) {
+          downloadRequests += 1;
           assert.equal(types, 'url');
           assert.equal(params.id, 'account-song');
           return {
@@ -541,8 +594,25 @@ test('server account playlists trigger offline download and are available after 
     });
     assert.equal(added.status, 200);
     assert.equal(added.body.success, true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(downloadRequests, 0);
+    assert.equal(cache.getTrack('netease', 'account-song'), undefined);
+
+    const requested = await postForm(baseUrl, '/php/offline_track.php', {
+      token,
+      user_id: String(userId),
+      action: 'download',
+      song_id: 'account-song',
+      source: 'netease',
+      name: 'Account Song',
+      artist: 'Artist'
+    });
+    assert.equal(requested.status, 202);
+    assert.equal(requested.body.success, true);
+    assert.equal(requested.body.status, 'pending');
 
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'account-song'));
+    assert.equal(downloadRequests, 1);
     assert.equal(downloaded.status, 'downloaded');
     assert.ok(fs.existsSync(downloaded.file_path));
 
@@ -610,7 +680,7 @@ test('music API returns and prewarms iPhone ALAC URL for offline FLAC lossless r
         }
       }
     });
-    await cache.syncAll();
+    await cache.requestDownload({ id: 'song-ios', source: 'netease', name: 'Song iOS', artist: 'Artist' });
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-ios'));
     assert.equal(downloaded.content_type, 'audio/x-flac');
 
@@ -712,7 +782,7 @@ test('music API skips offline FLAC for iPhone when compatible quality is request
         }
       }
     });
-    await cache.syncAll();
+    await cache.requestDownload({ id: 'song-ios-320', source: 'netease', name: 'Song iOS 320', artist: 'Artist' });
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-ios-320'));
     assert.equal(downloaded.content_type, 'audio/x-flac');
 
@@ -793,7 +863,7 @@ test('offline cache detects FLAC content when provider metadata is wrong', async
         }
       }
     });
-    await cache.syncAll();
+    await cache.requestDownload({ id: 'song-flac', source: 'netease', name: 'FLAC Song', artist: 'Artist' });
 
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-flac'));
     assert.equal(path.extname(downloaded.file_path), '.flac');
@@ -839,7 +909,7 @@ test('offline cache preserves URL extension when content type is generic and for
         }
       }
     });
-    await cache.syncAll();
+    await cache.requestDownload({ id: 'song-generic', source: 'netease', name: 'Generic Song', artist: 'Artist' });
 
     const downloaded = await waitFor(() => cache.getPlayableTrack('netease', 'song-generic'));
     assert.equal(path.extname(downloaded.file_path), '.flac');

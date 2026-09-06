@@ -54,7 +54,7 @@ npm run server
 
 ## iPhone Web / PWA 使用说明
 
-musiQ 现在可以作为 iPhone Safari / 主屏幕 PWA 使用。Web 版仍然复用同一套 Express 后端和 `webroot/` 前端，搜索、播放、换源、歌词、收藏、歌单、播放历史、离线音频缓存策略和音源健康检测都通过后端接口保留，不把 `sql.js` 数据库放进浏览器。
+musiQ 现在可以作为 iPhone Safari / 主屏幕 PWA 使用。Web 版仍然复用同一套 Express 后端和 `webroot/` 前端，搜索、播放、换源、歌词、收藏、歌单、播放历史、用户主动下载的离线音频和音源健康检测都通过后端接口保留，不把 `sql.js` 数据库放进浏览器。加入或同步歌单不会自动下载歌曲。
 
 本地预览：
 
@@ -249,7 +249,7 @@ Android 本地模式的边界：
 - Android 包内置原生前台播放服务和 MediaSession：播放时会显示系统媒体通知，并支持系统/耳机的播放、暂停、上一首、下一首控制。
 - 登录、收藏、歌单和播放历史写入手机本地存储，不依赖桌面端 `sql.js` 数据库。
 - APK 不内嵌 Node/Express，也不启动 `src/server/index.js`。
-- AI 助手和桌面版离线音频缓存仍属于桌面/Express 后端能力，不是当前 Android 本地模式能力。
+- AI 助手和用户主动触发的离线音频下载仍属于桌面/Express 后端能力，不是当前 Android 本地模式能力。
 
 如果要临时测试远端 Web/PWA 后端，仍可覆盖默认地址：
 

@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_VERSION = 'music-pwa-v39';
+const CACHE_VERSION = 'music-pwa-v40';
 const APP_SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 const LEGACY_CACHE_PREFIXES = ['musiq-pwa-'];
@@ -11,10 +11,10 @@ const APP_SHELL = [
   './offline.html',
   './manifest.webmanifest',
   './?source=pwa',
-  './css/style.css?v=2.1.13',
+  './css/style.css?v=2.1.14',
   './js/pwa-runtime.js?v=1.0.11',
   './js/media-session-artwork.js?v=1.0.1',
-  './js/main.js?v=2.2.27',
+  './js/main.js?v=2.2.28',
   './js/source-selector.js?v=1.0.4',
   './js/pwa.js?v=1.1.10',
   './public/music-default.png',

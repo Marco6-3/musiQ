@@ -633,6 +633,7 @@ function initDb(db) {
       size INTEGER DEFAULT NULL,
       error TEXT DEFAULT NULL,
       attempts INTEGER DEFAULT 0,
+      user_requested INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER DEFAULT (strftime('%s', 'now')),
       updated_at INTEGER DEFAULT (strftime('%s', 'now')),
       downloaded_at INTEGER DEFAULT NULL,
@@ -654,6 +655,10 @@ function initDb(db) {
       PRIMARY KEY(user_id, usage_date)
     );
   `);
+  const offlineTrackColumns = db.prepare('PRAGMA table_info(offline_tracks)').all();
+  if (!offlineTrackColumns.some((column) => column.name === 'user_requested')) {
+    db.exec('ALTER TABLE offline_tracks ADD COLUMN user_requested INTEGER NOT NULL DEFAULT 0');
+  }
   const now = formatDateTime(new Date());
   const insertStatus = db.prepare(`
     INSERT OR IGNORE INTO api_status (source, name, search, play, last_check)

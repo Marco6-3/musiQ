@@ -25,7 +25,6 @@ const CHINA_TIME_OFFSET_MS = 8 * 60 * 60 * 1000;
 
 async function handleAgentAssistant(db, req, res, {
   dispatcher,
-  offlineCache,
   agentModelClient,
   agentConfigResolver = resolveAgentConfig,
   agentUsagePolicy = {}
@@ -141,8 +140,6 @@ async function handleAgentAssistant(db, req, res, {
     }
   });
   addSongs();
-  if (offlineCache) offlineCache.scheduleSync();
-
   const replyParts = [];
   if (addedSongs.length) replyParts.push(`已把 ${addedSongs.length} 首歌加入「${playlist.name}」`);
   if (existingSongs.length) replyParts.push(`${existingSongs.length} 首已在歌单中`);

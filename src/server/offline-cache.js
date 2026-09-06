@@ -30,44 +30,41 @@ class OfflineMusicCache {
     this.queue = [];
     this.queued = new Set();
     this.active = 0;
-    this.syncTimer = null;
     this.closed = false;
     fs.mkdirSync(this.audioDir, { recursive: true });
   }
 
-  scheduleSync(delayMs = 250) {
-    if (this.closed) return;
-    clearTimeout(this.syncTimer);
-    this.syncTimer = setTimeout(() => {
-      this.syncTimer = null;
-      this.syncAll().catch((error) => {
-        console.warn('[offline-cache] sync failed:', error.message);
-      });
-    }, delayMs);
-    if (this.syncTimer.unref) this.syncTimer.unref();
-  }
-
-  async syncAll() {
-    if (this.closed) return;
+  async requestDownload(song) {
+    if (this.closed) throw new Error('离线缓存已关闭');
     await fsp.mkdir(this.audioDir, { recursive: true });
 
-    const desired = this._playlistSongs();
-    const desiredKeys = new Set(desired.map((song) => song.cache_key));
-    const existing = this.db.prepare('SELECT cache_key, file_path FROM offline_tracks').all();
+    const item = normalizeSong(song);
+    if (!item.id) throw new Error('缺少歌曲ID');
+    item.cache_key = cacheKey(item.source, item.id);
 
-    for (const row of existing) {
-      if (desiredKeys.has(row.cache_key)) continue;
+    const previous = this.getTrack(item.source, item.id);
+    if (previous && !previous.user_requested) {
+      await this._deleteTrack(previous.cache_key, previous.file_path);
+    }
+
+    this._upsertPending(item);
+    const track = this.getTrack(item.source, item.id);
+    if (this._isUsableDownloadedTrack(track)) return { track, queued: false };
+
+    this.enqueue(item);
+    return { track: this.getTrack(item.source, item.id), queued: true };
+  }
+
+  async removeUnrequestedTracks() {
+    const rows = this.db.prepare(`
+      SELECT cache_key, file_path
+      FROM offline_tracks
+      WHERE user_requested = 0
+    `).all();
+    for (const row of rows) {
       await this._deleteTrack(row.cache_key, row.file_path);
     }
-
-    for (const song of desired) {
-      this._upsertPending(song);
-      const track = this.getTrack(song.source, song.id);
-      if (this._isUsableDownloadedTrack(track)) {
-        continue;
-      }
-      this.enqueue(song);
-    }
+    return rows.length;
   }
 
   enqueue(song) {
@@ -82,7 +79,7 @@ class OfflineMusicCache {
 
   getTrack(source, songId) {
     return this.db.prepare(`
-      SELECT cache_key, song_id, source, name, artist, album, pic_id, status, file_path, content_type, br, size
+      SELECT cache_key, song_id, source, name, artist, album, pic_id, status, file_path, content_type, br, size, user_requested
       FROM offline_tracks
       WHERE source = ? AND song_id = ?
     `).get(String(source || 'netease'), String(songId || ''));
@@ -90,7 +87,7 @@ class OfflineMusicCache {
 
   getTrackByKey(cacheKeyValue) {
     return this.db.prepare(`
-      SELECT cache_key, song_id, source, name, artist, album, pic_id, status, file_path, content_type, br, size
+      SELECT cache_key, song_id, source, name, artist, album, pic_id, status, file_path, content_type, br, size, user_requested
       FROM offline_tracks
       WHERE cache_key = ?
     `).get(String(cacheKeyValue || ''));
@@ -98,7 +95,7 @@ class OfflineMusicCache {
 
   getPlayableTrack(source, songId) {
     const track = this.getTrack(source, songId);
-    if (!track || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
+    if (!track?.user_requested || track.status !== 'downloaded' || !track.file_path || !fs.existsSync(track.file_path)) {
       return null;
     }
     if (!this._isUsableDownloadedTrack(track)) return null;
@@ -107,7 +104,6 @@ class OfflineMusicCache {
 
   close() {
     this.closed = true;
-    clearTimeout(this.syncTimer);
   }
 
   _pump() {
@@ -289,34 +285,17 @@ class OfflineMusicCache {
     return repaired;
   }
 
-  _playlistSongs() {
-    const rows = this.db.prepare(`
-      SELECT ps.source, ps.song_id AS id, ps.name, ps.artist, ps.album, ps.pic_id
-      FROM playlist_songs ps
-      INNER JOIN playlists p ON p.id = ps.playlist_id
-      ORDER BY ps.created_at DESC
-    `).all();
-
-    const byKey = new Map();
-    for (const row of rows) {
-      const song = normalizeSong(row);
-      if (!song.id) continue;
-      song.cache_key = cacheKey(song.source, song.id);
-      if (!byKey.has(song.cache_key)) byKey.set(song.cache_key, song);
-    }
-    return [...byKey.values()];
-  }
-
   _upsertPending(song) {
     this.db.prepare(`
       INSERT INTO offline_tracks
-        (cache_key, song_id, source, name, artist, album, pic_id, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', strftime('%s', 'now'))
+        (cache_key, song_id, source, name, artist, album, pic_id, status, user_requested, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 1, strftime('%s', 'now'))
       ON CONFLICT(cache_key) DO UPDATE SET
         name = excluded.name,
         artist = excluded.artist,
         album = excluded.album,
         pic_id = excluded.pic_id,
+        user_requested = 1,
         updated_at = strftime('%s', 'now')
     `).run(
       song.cache_key,

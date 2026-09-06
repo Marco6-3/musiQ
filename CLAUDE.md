@@ -50,7 +50,7 @@ npm run probe:sources -- --disable-lrclib
 - `src/server/index.js`: Express backend. It serves `webroot/`, implements PHP-compatible routes, and proxies music API requests.
 - `src/server/agent-assistant.js`: protected `/php/agent_assistant.php` assistant route. It uses DeepSeek/OpenAI-compatible config from environment variables, `AGENTS.local.md`, or local Claude Code settings; keep API keys out of git.
 - `src/server/database.js`: persistent SQLite-like storage using `sql.js` WASM. Non-transaction writes are debounced, while transaction commits and close flush immediately. This avoids native module and Electron ABI problems.
-- `src/server/offline-cache.js`: playlist-driven offline audio cache. Songs present in any local playlist are downloaded in the background at `br=999`; when no playlist references a song, its local audio file is removed.
+- `src/server/offline-cache.js`: user-requested offline audio cache. Adding or syncing playlist songs never downloads audio; only the protected `/php/offline_track.php` action queues a download at `br=999`. Legacy playlist-driven cache rows are removed on backend startup.
 - `src/server/api-monitor.js`: periodic music source health checks, writing to `api_status`.
 - `src/server/play-history.js`: `/php/play_history.php` route for record, recent, top, and clear actions.
 

@@ -187,6 +187,7 @@
         mode: $('#mode-btn'),
         favorite: $('#favorite-btn'),
         addPlaylist: $('#add-playlist-btn'),
+        download: $('#download-btn'),
         queueOpen: $('#queue-open-btn'),
         expand: $('#expand-btn'),
         progress: $('#progress-slider'),
@@ -200,6 +201,7 @@
         expandedPlay: $('#expanded-play-btn'),
         expandedPrev: $('#expanded-prev-btn'),
         expandedNext: $('#expanded-next-btn'),
+        expandedDownload: $('#expanded-download-btn'),
         expandedStatus: $('#expanded-status'),
         expandedQuality: $('#expanded-quality'),
         expandedProgress: $('#expanded-progress-slider'),
@@ -282,6 +284,8 @@
         els.mode.addEventListener('click', cyclePlayMode);
         els.favorite.addEventListener('click', toggleFavorite);
         els.addPlaylist.addEventListener('click', () => openPlaylistDialog(state.currentSong));
+        els.download?.addEventListener('click', () => requestSongDownload(state.currentSong));
+        els.expandedDownload?.addEventListener('click', () => requestSongDownload(state.currentSong));
         els.queueOpen.addEventListener('click', () => openModal('queue-modal'));
         els.expand.addEventListener('click', () => openModal('player-modal'));
         els.dockSong?.addEventListener('click', () => {
@@ -2400,6 +2404,31 @@
             renderView(state.view);
         } catch (error) {
             showToast(error.message || '收藏失败', 'error');
+        }
+    }
+
+    async function requestSongDownload(song = state.currentSong) {
+        if (!song?.id) return;
+        if (!state.currentUser) {
+            openModal('auth-modal');
+            showToast('请先登录后再下载歌曲', 'error');
+            return;
+        }
+
+        const buttons = [els.download, els.expandedDownload].filter(Boolean);
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+            const data = await apiPost('php/offline_track.php', {
+                action: 'download',
+                user_id: state.currentUser.id,
+                ...songPayload(song)
+            });
+            if (!data.success) throw new Error(data.message || '下载失败');
+            showToast(data.status === 'downloaded' ? '歌曲已经下载' : '已开始下载', 'success');
+        } catch (error) {
+            showToast(error.message || '下载失败', 'error');
+        } finally {
+            buttons.forEach((button) => { button.disabled = false; });
         }
     }
 
