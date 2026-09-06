@@ -1,5 +1,7 @@
 'use strict';
 
+const { Dispatcher } = require('./source-providers/dispatcher');
+
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -46,7 +48,7 @@ const {
 
 const projectRoot = path.resolve(__dirname, '../..');
 const webroot = resolveWebroot();
-const MUSIC_API_CACHE_VERSION = 'music-api-v7';
+const MUSIC_API_CACHE_VERSION = 'music-api-v8';
 const ARTWORK_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const ARTWORK_CACHE_MAX = 96;
 const ARTWORK_ALLOWED_HOST_SUFFIXES = Object.freeze([
@@ -1603,6 +1605,8 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   const apiQuery = normalizeMusicApiQuery(req);
+  const forceRefresh = apiQuery.types === 'url' && apiQuery.refresh === '1';
+  delete apiQuery.refresh;
 
   if (apiQuery.types === 'url' && offlineCache) {
     const track = offlineCache.getPlayableTrack(apiQuery.source || 'netease', apiQuery.id);
@@ -1647,7 +1651,7 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
 
   // Check in-memory cache first
   const memCached = memCacheGet(cacheKey);
-  if (memCached) {
+  if (memCached && !forceRefresh) {
     res.setHeader('X-Cache', 'MEM-HIT');
     res.type('json').send(memCached);
     return;
@@ -1655,7 +1659,7 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
 
   // Check file cache
   const cachedBody = readFreshCacheFile(cacheFile, cacheTtl);
-  if (cachedBody != null) {
+  if (cachedBody != null && !forceRefresh) {
     memCacheSet(cacheKey, cachedBody, cacheTtl);
     res.setHeader('X-Cache', 'HIT');
     res.type('json').send(cachedBody);
@@ -1702,7 +1706,9 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
         if (result) {
           let body = typeof result === 'string' ? result : result.data;
           const contentType = typeof result === 'string' ? 'application/json' : result.contentType;
-          body = await verifyMusicApiUrlBody(body, apiQuery);
+          if (!(apiQuery.types === 'url' && isLosslessRequest(apiQuery.br) && dispatcher instanceof Dispatcher)) {
+            body = await verifyMusicApiUrlBody(body, apiQuery);
+          }
           if (typeof body === 'string' && /^[\[{]/.test(body.trim())) {
             fs.writeFileSync(cacheFile, body, 'utf8');
             memCacheSet(cacheKey, body, cacheTtl);
@@ -1747,7 +1753,7 @@ async function proxyMusicApi(req, res, cacheDir, dispatcher, offlineCache, optio
     if (result.source) res.setHeader('X-Music-Source', result.source);
     res.type(result.contentType).send(result.body);
   } catch {
-    const staleBody = readCacheFile(cacheFile);
+    const staleBody = apiQuery.types === 'url' ? null : readCacheFile(cacheFile);
     if (staleBody != null) {
       res.setHeader('X-Cache', 'STALE');
       res.type('json').send(staleBody);
@@ -1770,6 +1776,7 @@ async function verifyMusicApiUrlBody(body, apiQuery) {
   if (!payload || !audioUrl) return body;
 
   const metadata = await probeAudioUrl(audioUrl);
+  if (metadata.playable === false) throw new Error('音源没有返回可播放音频');
   applyVerifiedAudioMetadata(payload, apiQuery, metadata);
 
   return JSON.stringify(parsed);
@@ -2199,3 +2206,4 @@ module.exports = {
   parseAllowedArtworkUrl,
   processArtworkImage
 };
+

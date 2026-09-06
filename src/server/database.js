@@ -450,6 +450,13 @@ function normalizeProcessText(value) {
 }
 
 function readProcessInfo(pid) {
+  // The current process identity is available even in restricted containers.
+  if (Number(pid) === process.pid) return {
+    name: path.basename(process.execPath),
+    executablePath: process.execPath,
+    commandLine: process.argv.join(' '),
+    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString()
+  };
   if (process.platform === 'win32') return readWindowsProcessInfo(pid);
   return readProcProcessInfo(pid) || readPosixProcessInfo(pid);
 }
@@ -925,3 +932,4 @@ module.exports = {
   normalizeArtist,
   formatDateTime
 };
+

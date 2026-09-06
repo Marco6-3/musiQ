@@ -118,3 +118,13 @@ npm run probe:sources
 ```
 
 If a worktree is based on older code that mentions `better-sqlite3`, Electron ABI rebuilds, or `scripts/electron-node.js`, migrate the feature into the current `sql.js` architecture instead of directly accepting the old runtime path.
+
+
+
+## Playback reliability update
+
+- Lossless `/api.php?types=url&br=999` requests pass through `Dispatcher.url`, probe candidate streams concurrently, and may return the first verified lossless candidate without waiting for slower adapters. HQ proxy requests preserve source-specific adapter ordering.
+- Audio verification uses bounded streaming reads (4 KiB) and byte signatures. A URL suffix, Content-Type, bitrate, or MP4 container alone must not establish lossless encoding. Unknown MP4/ALAC streams stay conservatively unverified as lossless.
+- `refresh=1` on URL requests bypasses response caches; it is stripped before calling providers. Never serve stale URL responses after an upstream failure. Frontend URL cache TTL is 45 seconds.
+- Shared Windows/Web/PWA UI uses a red accent and neutral dark library layout. Keep main script/CSS version strings synchronized with `webroot/sw.js` and bump its cache version for releases.
+- Run `node --test tests/playback-reliability.test.js tests/music-api.test.js` for deterministic regressions. Browser layout QA, Windows packaging, and physical iPhone background playback require separate validation before release.

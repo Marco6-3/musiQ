@@ -54,7 +54,10 @@ class ProviderHealth {
 
 // Dispatches music requests across providers with fallback or race strategy.
 class Dispatcher {
-  constructor(providers = [], { strategy = 'fallback', racePriorityCount = 2, racePriorityTimeout = PRIORITY_RACE_TIMEOUT } = {}) {
+  constructor(providers = [], { strategy = 'fallback', racePriorityCount = 2, racePriorityTimeout = PRIORITY_RACE_TIMEOUT, requestTimeout = 12000, probeAudioUrl = null } = {}) {
+    this.requestTimeout = requestTimeout;
+    this.probeAudioUrl = probeAudioUrl;
+    this._activeCalls = new Map();
     this.providers = providers.filter((provider) => provider.enabled);
     this.strategy = strategy;
     this.racePriorityCount = racePriorityCount;
@@ -103,6 +106,24 @@ class Dispatcher {
     }
   }
 
+  // A stalled adapter cannot hold a request forever or accumulate duplicate work.
+  async _call(provider, method, args) {
+    const key = JSON.stringify([this.providers.indexOf(provider), method, args]);
+    let pending = this._activeCalls.get(key);
+    if (!pending) {
+      if (this._activeCalls.size >= 256) throw new Error('provider queue full');
+      pending = Promise.resolve().then(() => provider[method](...args));
+      this._activeCalls.set(key, pending);
+      pending.finally(() => this._activeCalls.delete(key)).catch(() => {});
+    }
+    let timer;
+    try {
+      return await Promise.race([pending, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('provider deadline exceeded')), this.requestTimeout);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
   async _fallback(method, ...args) {
     const sorted = this._sortedProviders(preferredProviderName(method, args));
     for (const provider of sorted) {
@@ -112,7 +133,7 @@ class Dispatcher {
         continue;
       }
       try {
-        const result = await provider[method](...args);
+        const result = await this._call(provider, method, args);
         if (hasProviderResult(method, result, args)) {
           console.log(`[Dispatcher] ${method} hit: ${provider.name}`);
           this._recordSuccess(provider);
@@ -137,7 +158,7 @@ class Dispatcher {
     const pending = new Set();
 
     const raceOne = (provider) => {
-      const promise = provider[method](...args)
+      const promise = this._call(provider, method, args)
         .then((result) => {
           if (!hasProviderResult(method, result, args)) throw new Error('empty');
           return { provider: provider.name, result, ref: provider };
@@ -193,9 +214,9 @@ class Dispatcher {
     const settled = await Promise.allSettled(
       healthy.map(async (provider) => {
         try {
-          let results = await provider.search(platform, keyword, count);
+          let results = await this._call(provider, 'search', [platform, keyword, count]);
           if ((!Array.isArray(results) || results.length === 0) && platform) {
-            results = await provider.search(null, keyword, count);
+            results = await this._call(provider, 'search', [null, keyword, count]);
           }
           if (!Array.isArray(results) || results.length === 0) return [];
           this._recordSuccess(provider);
@@ -234,79 +255,41 @@ class Dispatcher {
     return ranked;
   }
 
-  // For lossless requests: query all healthy providers in parallel, probe each URL,
-  // and return the one with the highest verified bitrate.
+  // Probe as soon as each provider resolves; a verified lossless stream can win
+  // without waiting for an unrelated slow provider. Lossy fallback waits for all.
   async _selectBest(method, ...args) {
-    const sorted = this._sortedProviders(preferredProviderName(method, args));
-    const healthy = sorted.filter((p) => this._getHealth(p).isHealthy());
-
-    if (healthy.length === 0) return emptyResult(method);
-
-    // Fire all providers in parallel
-    const settled = await Promise.allSettled(
-      healthy.map(async (provider) => {
-        try {
-          const result = await provider[method](...args);
-          if (!hasProviderResult(method, result, args)) return null;
-          return { provider: provider.name, result, ref: provider };
-        } catch (error) {
-          this._recordFailure(provider);
-          console.warn(`[Dispatcher] ${method} best-of failed on ${provider.name}:`, errorMessage(error));
-          return null;
-        }
-      })
-    );
-
-    const candidates = settled
-      .filter((r) => r.status === 'fulfilled' && r.value)
-      .map((r) => r.value);
-
-    if (candidates.length === 0) return emptyResult(method);
-
-    // Probe each candidate URL to verify actual quality
-    const probe = getAudioProbe();
-    if (!probe || method !== 'url') {
-      // No probe available or not a url request — return first candidate
-      this._recordSuccess(candidates[0].ref);
-      return attachProviderName(method, candidates[0].result, candidates[0].provider);
-    }
-
-    const probed = await Promise.allSettled(
-      candidates.map(async (candidate) => {
-        try {
-          const url = candidate.result?.url || candidate.result?.data?.url;
-          if (!url) return { ...candidate, br: 0, lossless: false };
-          const metadata = await probe.probeAudioUrl(url);
-          const rawBr = extractBitrate(candidate.result);
-          const verifiedLossless = Boolean(metadata.verified && metadata.lossless);
-          const br = verifiedLossless ? 999 : downgradeFakeLosslessBitrate(rawBr);
-          return {
-            ...candidate,
-            br,
-            lossless: verifiedLossless,
-            verified: Boolean(metadata.verified),
-            codec: metadata.codec,
-            contentType: metadata.contentType
-          };
-        } catch {
-          return { ...candidate, br: downgradeFakeLosslessBitrate(extractBitrate(candidate.result)), lossless: false, verified: false };
-        }
-      })
-    );
-
-    const verified = probed
-      .filter((r) => r.status === 'fulfilled' && r.value)
-      .map((r) => r.value)
-      .sort((a, b) => {
-        // Prefer lossless over lossy, then higher bitrate
-        if (a.lossless !== b.lossless) return a.lossless ? -1 : 1;
-        return b.br - a.br;
-      });
-
-    if (verified.length === 0) return emptyResult(method);
-
-    const best = verified[0];
-    console.log(`[Dispatcher] ${method} best-of-all: ${best.provider} (${best.codec || 'unknown'}, lossless=${best.lossless}, br=${best.br})`);
+    const healthy = this._sortedProviders(preferredProviderName(method, args))
+      .filter((provider) => this._getHealth(provider).isHealthy());
+    if (!healthy.length) return emptyResult(method);
+    const probe = this.probeAudioUrl || getAudioProbe()?.probeAudioUrl;
+    const tasks = healthy.map(async (provider) => {
+      try {
+        const result = await this._call(provider, method, args);
+        if (!hasProviderResult(method, result, args)) return null;
+        const metadata = probe ? await probe(result.url) : {};
+        if (metadata.playable === false) return null;
+        const lossless = Boolean(metadata.verified && metadata.lossless);
+        return {
+          result, ref: provider, provider: provider.name, lossless,
+          br: lossless ? 999 : downgradeFakeLosslessBitrate(extractBitrate(result)),
+          verified: Boolean(metadata.verified), codec: metadata.codec,
+          contentType: metadata.contentType
+        };
+      } catch (error) {
+        this._recordFailure(provider);
+        return null;
+      }
+    });
+    const all = Promise.all(tasks).then((items) => items.filter(Boolean).sort((a, b) =>
+      Number(b.lossless) - Number(a.lossless) || Number(b.verified) - Number(a.verified) || b.br - a.br
+    )[0] || null);
+    const lossless = Promise.any(tasks.map(async (task) => {
+      const candidate = await task;
+      if (!candidate?.lossless) throw new Error('not verified lossless');
+      return candidate;
+    })).catch(() => all);
+    const best = await Promise.race([lossless, all]);
+    if (!best) return emptyResult(method);
     this._recordSuccess(best.ref);
     return attachProviderName(method, annotateUrlResult(best.result, best), best.provider);
   }
@@ -321,7 +304,7 @@ class Dispatcher {
   async url(song, quality) {
     // For lossless requests, use best-of-all strategy: query all providers,
     // probe each result, and pick the highest verified quality.
-    const isLossless = Number(quality) >= LOSSLESS_BR_THRESHOLD || String(quality).toLowerCase() === 'flac';
+    const isLossless = Number(quality) >= LOSSLESS_BR_THRESHOLD || ['flac', 'lossless', 'sq'].includes(String(quality).toLowerCase());
     if (isLossless) {
       return this._selectBest('url', song, quality);
     }
@@ -337,6 +320,11 @@ class Dispatcher {
   }
 
   async proxy(types, params) {
+    if (types === 'url' && (Number(params.br) >= LOSSLESS_BR_THRESHOLD || ['flac', 'lossless', 'sq'].includes(String(params.br).toLowerCase()))) {
+      const result = await this.url(params, params.br || '320');
+      if (!result) return null;
+      return { ok: true, data: JSON.stringify(result), contentType: 'application/json', providerName: result.providerName };
+    }
     return this._dispatch('proxy', types, params);
   }
 
@@ -373,7 +361,7 @@ function emptyResult(method) {
 }
 
 function attachProviderName(method, result, providerName) {
-  if (method !== 'proxy' || !result || typeof result !== 'object' || Array.isArray(result)) {
+  if (!['proxy', 'url'].includes(method) || !result || typeof result !== 'object' || Array.isArray(result)) {
     return result;
   }
   return { ...result, providerName };
@@ -458,7 +446,7 @@ function annotateUrlResult(result, metadata) {
     ? { ...output.data }
     : output;
 
-  payload.br = metadata.br || payload.br;
+  payload.br = metadata.br;
   payload.verified_audio = Boolean(metadata.verified);
   payload.lossless = Boolean(metadata.lossless);
   if (metadata.codec) payload.codec = metadata.codec;
@@ -469,3 +457,4 @@ function annotateUrlResult(result, metadata) {
 }
 
 module.exports = { Dispatcher, ProviderHealth, hasProviderResult, errorMessage };
+
