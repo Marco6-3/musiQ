@@ -2396,3 +2396,131 @@ body.is-safari-browser-pwa-candidate .player-status {
         animation: none !important;
     }
 }
+
+
+
+/* Music 3: a quiet library, red controls and a persistent listening bar. */
+:root {
+    --bg: #161619;
+    --panel: #1c1c20;
+    --panel-strong: #242429;
+    --panel-soft: #29292f;
+    --text: #f5f5f7;
+    --muted: #aaaab4;
+    --subtle: #858590;
+    --border: #303036;
+    --accent: #e63946;
+    --accent-rgb: 230, 57, 70;
+    --accent-contrast: #fff;
+    --radius: 14px;
+    --shadow: none;
+}
+body { background: var(--bg); }
+.ambient { display: none; }
+.glass-panel { background: var(--panel); backdrop-filter: none; -webkit-backdrop-filter: none; box-shadow: none; }
+.app-shell { inset: 40px 0 96px; grid-template-columns: 210px minmax(0, 1fr); gap: 0; }
+body.is-browser-client .app-shell { top: 0; }
+.side-rail { border-radius: 0; border: 0; border-right: 1px solid var(--border); padding: 28px 16px; background: #19191d; }
+.brand { padding: 0 8px 26px; border: 0; gap: 10px; }
+.brand strong { font-size: 26px; letter-spacing: -1px; }
+.brand-caption { display: block; font-size: 10px; font-weight: 400; letter-spacing: 3px; margin-top: 4px; color: var(--muted); }
+.brand-mark { width: 38px; height: 38px; border-radius: 12px; box-shadow: none; }
+.nav-list { gap: 6px; }
+.nav-item { border-radius: 9px; min-height: 46px; color: var(--muted); }
+.nav-item.active { color: #fff; background: #e63946; box-shadow: none; }
+.nav-item:not(.active):hover { background: #27272d; color: #fff; }
+.main-stage { gap: 0; }
+.top-bar { border: 0; border-radius: 0; background: var(--bg); padding: 22px 30px 16px; }
+#view-title { font-size: 24px; letter-spacing: -0.5px; }
+.search-form input { background: #25252b; border-radius: 24px; }
+.search-form select, .source-selector-btn { background: #25252b; border-radius: 10px; }
+.search-form button { border-radius: 22px; }
+.content-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.now-panel { display: none; }
+.content-panel { border: 0; background: var(--bg); padding: 12px 30px 26px; border-radius: 0; }
+.hero-strip { grid-template-columns: minmax(0, 1fr) 190px; gap: 16px; margin-bottom: 30px; }
+.feature-card { min-height: 248px; padding: 30px; justify-content: center; border: 0; border-radius: 16px; background: linear-gradient(115deg, #632b38, #392531 65%, #29242c); }
+.feature-card::before { display: none; }
+.feature-card h2 { font-size: clamp(26px, 3vw, 40px); line-height: 1.25; max-width: 65%; z-index: 1; margin: 12px 0 6px; }
+.feature-card p { font-size: 12px; max-width: 60%; z-index: 1; color: #e0bdc6; }
+.feature-card .eyebrow { color: #f2b8c3; font-size: 10px; letter-spacing: 2px; }
+.hero-play { align-self: flex-start; margin-top: 22px; z-index: 1; border-radius: 24px; box-shadow: none; padding: 0 22px; font-size: 13px; }
+.hero-record { position: absolute; width: 220px; height: 220px; border-radius: 50%; right: -22px; top: 30px; display: grid; place-items: center; transform: rotate(-18deg); background: repeating-radial-gradient(circle, #17151a 0 2px, #302b32 3px 4px); border: 8px solid #1d1a20; box-shadow: -12px 14px 30px #140e1960; }
+.hero-record span { display: grid; place-items: center; width: 82px; height: 82px; border-radius: 50%; background: #df5666; color: #ffe1df; font: italic 58px Georgia, serif; }
+.stat-card { border-radius: 16px; background: linear-gradient(150deg, #2f2c37, #232229); padding: 24px; }
+.stat-card strong { font-size: 52px; font-weight: 500; }
+.stat-card .text-btn { padding: 14px 0 0; text-align: left; color: #ef9da7; font-size: 12px; }
+.section-head h2 { font-size: 19px; }
+.toplist-grid { grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 14px; margin-bottom: 28px; }
+.toplist-card { min-height: 154px; border: 0; border-radius: 12px; background: linear-gradient(145deg, #87424c, #443038); position: relative; overflow: hidden; }
+.toplist-card:nth-child(2n) { background: linear-gradient(145deg, #345d70, #293844); }
+.toplist-card:nth-child(3n) { background: linear-gradient(145deg, #666083, #393548); }
+.toplist-card:nth-child(4n) { background: linear-gradient(145deg, #6c6546, #3e3a2e); }
+.toplist-card::after { content: '▶'; position: absolute; bottom: 12px; right: 14px; color: #ffffffbb; font-size: 14px; }
+.toplist-card .eyebrow { font-size: 9px; letter-spacing: 2px; color: #ffffffa0; }
+.toplist-card h3 { font-size: 22px; margin-top: 22px; }
+.toplist-card .meta { font-size: 11px; color: #ffffffc0; padding-right: 18px; }
+.song-card, .queue-song { border-radius: 8px; border-color: transparent; background: transparent; }
+.song-card:nth-child(even), .queue-song:nth-child(even) { background: #ffffff03; }
+.song-card:hover, .queue-song:hover { background: #ffffff07; }
+.player-dock { left: 0; right: 0; bottom: 0; border-radius: 0; background: #202024; border: 0; border-top: 1px solid #35353c; min-height: 96px; padding-inline: 24px; }
+.dock-song img { border-radius: 8px; box-shadow: none; }
+.primary-btn, .play-btn { box-shadow: none; }
+.player-status { color: #b8b8c1; }
+button:focus-visible, [role="button"]:focus-visible, a:focus-visible { outline: 2px solid #ff8791; outline-offset: 3px; }
+select option { color: #f5f5f7; background: #25252b; }
+@media (min-width: 761px) and (max-width: 1000px) {
+    .app-shell { grid-template-columns: 174px minmax(0, 1fr); }
+    .top-bar, .content-panel { padding-left: 20px; padding-right: 20px; }
+    .hero-strip { grid-template-columns: 1fr; }
+    .stat-card { display: none; }
+}
+@media (max-width: 760px) {
+    .app-shell { inset: max(4px, var(--safe-top)) max(10px, var(--safe-right)) calc(var(--mobile-nav-height) + var(--mobile-player-height) + var(--safe-bottom) + 20px) max(10px, var(--safe-left)); grid-template-columns: 1fr; }
+    body.is-browser-client .app-shell, body.is-standalone-pwa.is-browser-client .app-shell { top: max(4px, var(--safe-top)); }
+    .side-rail { padding: 7px max(14px, var(--safe-right)) calc(7px + var(--safe-bottom)) max(14px, var(--safe-left)); background: #1c1c20; border-top: 1px solid #303036; }
+    .nav-item { min-height: 52px; }
+    .nav-item.active { color: #ff6875; background: transparent; }
+    .top-bar { padding: 18px 8px 12px; }
+    #view-title { font-size: 26px; }
+    .content-panel { padding: 10px 8px 18px; }
+    .hero-strip { grid-template-columns: 1fr; margin-bottom: 24px; }
+    .stat-card { display: none; }
+    .feature-card { min-height: 226px; padding: 22px; }
+    .feature-card h2 { font-size: 28px; max-width: 76%; }
+    .feature-card p { font-size: 11px; max-width: 70%; }
+    .hero-record { width: 170px; height: 170px; right: -56px; top: 42px; opacity: .65; }
+    .hero-record span { width: 64px; height: 64px; font-size: 46px; }
+    .hero-play { height: 38px; font-size: 12px; margin-top: 18px; }
+    .toplist-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .toplist-card { min-height: 136px; padding: 14px; }
+    .toplist-card h3 { font-size: 21px; }
+    .player-dock { left: max(10px, var(--safe-left)); right: max(10px, var(--safe-right)); bottom: calc(var(--mobile-nav-height) + var(--safe-bottom) + 8px); min-height: var(--mobile-player-height); border: 1px solid #393940; border-radius: 12px; padding-inline: 10px; background: #26262c; }
+    .search-form input { min-width: 0; font-size: 16px; }
+}
+
+/* Keep labels visible in the compact desktop sidebar. */
+@media (min-width: 761px) and (max-width: 1020px) {
+    .nav-item, .nav-item:not(.active) { font-size: 14px; justify-content: flex-start; padding: 0 12px; }
+}
+
+/* Visual QA: leave enough width for mobile track information. */
+@media (max-width: 760px) {
+    .dock-song { gap: 8px; }
+    .dock-song img { width: 44px; height: 44px; flex-basis: 44px; }
+    .dock-song div { display: grid; gap: 4px; flex: 1; align-content: center; }
+    .dock-song strong { width: 100%; max-width: none; font-size: 14px; line-height: 1.35; }
+    #dock-artist { width: 100%; font-size: 12px; line-height: 1.35; }
+    #dock-artist::before { content: none; }
+    .control-row { gap: 3px; }
+}
+@media (max-width: 360px) {
+    .player-dock #favorite-btn { display: none; }
+}
+@media (max-width: 760px) {
+    .auth-card { padding-top: 60px; }
+}
+@media (max-width: 360px) {
+    .feature-card h2 { font-size: 24px; max-width: 100%; }
+    .feature-card p { max-width: 86%; }
+}

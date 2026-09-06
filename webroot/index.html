@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="description" content="music - 音乐播放器">
-    <meta name="theme-color" content="#07110d">
+    <meta name="theme-color" content="#161619">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="music">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -14,7 +14,7 @@
     <link rel="icon" href="public/music-default.png">
     <link rel="apple-touch-icon" href="public/icons/apple-touch-icon-180.png">
     <link rel="manifest" href="manifest.webmanifest">
-    <link rel="stylesheet" href="css/style.css?v=2.1.13">
+    <link rel="stylesheet" href="css/style.css?v=3.0.2">
     <script>
         window.__MUSIC_CONFIG__ = window.__MUSIC_CONFIG__ || window.__MUSIQ_CONFIG__ || {};
         window.__MUSIQ_CONFIG__ = window.__MUSIC_CONFIG__;
@@ -39,7 +39,7 @@
             <div class="brand">
                 <img src="public/music-default.png" alt="music" class="brand-mark">
                 <div>
-                    <strong>music</strong>
+                    <strong>music<span class="brand-caption">听见热爱</span></strong>
                 </div>
             </div>
             <nav class="nav-list" aria-label="主导航">
@@ -111,7 +111,7 @@
         <main class="main-stage">
             <header class="top-bar glass-panel">
                 <div class="top-title-row">
-                    <h1 id="view-title">为今晚找一首歌</h1>
+                    <h1 id="view-title">发现音乐</h1>
                     <div class="mobile-account-entry" aria-label="账号">
                         <button class="ghost-btn mobile-login-btn" id="mobile-login-open-btn">登录</button>
                         <div class="mobile-user-chip" id="mobile-user-chip" hidden>
@@ -122,10 +122,10 @@
                     </div>
                 </div>
                 <form class="search-form" id="search-form">
-                    <input id="search-input" type="search" placeholder="搜索歌曲..." autocomplete="off">
+                    <input id="search-input" aria-label="搜索歌曲、歌手" type="search" placeholder="搜索歌曲、歌手，发现好音乐" autocomplete="off">
                     <select id="quality-select" title="音质">
                         <option value="320">极高 HQ</option>
-                        <option value="999" selected>无损 SQ</option>
+                        <option value="999" selected>无损优先 SQ</option>
                     </select>
                     <select id="source-select" title="音乐源">
                         <option value="netease" selected>网易云音乐</option>
@@ -180,13 +180,13 @@
             </div>
             <div class="progress-row">
                 <span id="current-time">00:00</span>
-                <input type="range" id="progress-slider" min="0" max="1000" value="0">
+                <input type="range" aria-label="播放进度" id="progress-slider" min="0" max="1000" value="0">
                 <span id="duration-time">00:00</span>
             </div>
         </div>
         <div class="volume-row">
             <span>音量</span>
-            <input type="range" id="volume-slider" min="0" max="100" value="70">
+            <input type="range" aria-label="音量" id="volume-slider" min="0" max="100" value="70">
         </div>
     </section>
 
@@ -355,9 +355,10 @@
     <audio id="audio" preload="auto" playsinline></audio>
     <script src="js/pwa-runtime.js?v=1.0.11"></script>
     <script src="js/media-session-artwork.js?v=1.0.1"></script>
-    <script src="js/main.js?v=2.2.28"></script>
+    <script src="js/main.js?v=3.0.2"></script>
     <script src="js/source-selector.js?v=1.0.4"></script>
     <script src="js/pwa.js?v=1.1.10"></script>
 </body>
 
 </html>
+

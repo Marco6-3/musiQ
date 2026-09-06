@@ -1,42 +1,39 @@
 'use strict';
 
-const axios = require('axios');
-
 const AUDIO_PROBE_BYTES = 4096;
 const AUDIO_PROBE_TIMEOUT_MS = 6000;
 
-/**
- * Probe the first few bytes of an audio URL to detect actual codec/format.
- * Returns { codec, contentType, lossless, verified, probe_status }.
- */
+// Read only a prefix even when the CDN ignores Range. Never buffer a whole song.
 async function probeAudioUrl(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUDIO_PROBE_TIMEOUT_MS);
+  let reader;
   try {
-    const response = await axios.get(url, {
-      timeout: AUDIO_PROBE_TIMEOUT_MS,
-      responseType: 'arraybuffer',
-      maxContentLength: AUDIO_PROBE_BYTES * 4,
-      headers: {
-        Range: `bytes=0-${AUDIO_PROBE_BYTES - 1}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        Accept: 'audio/*,*/*'
-      },
-      validateStatus: (status) => status >= 200 && status < 400,
-      transformResponse: [(data) => data]
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Range: `bytes=0-${AUDIO_PROBE_BYTES - 1}`, Accept: 'audio/*,*/*' }
     });
-    const finalUrl = response.request?.res?.responseUrl || url;
-    const bytes = Buffer.from(response.data || []);
-    return {
-      ...audioMetadataFromBytes(bytes, response.headers['content-type'], finalUrl),
-      verified: bytes.length > 0,
-      probe_status: response.status
-    };
+    if (!response.ok || !response.body) {
+      return { codec: '', lossless: false, verified: false, playable: false, probe_status: response.status };
+    }
+    reader = response.body.getReader();
+    const chunks = [];
+    let size = 0;
+    while (size < AUDIO_PROBE_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value.subarray(0, AUDIO_PROBE_BYTES - size));
+      chunks.push(chunk);
+      size += chunk.length;
+    }
+    const metadata = audioMetadataFromBytes(Buffer.concat(chunks), response.headers.get('content-type'), response.url);
+    return { ...metadata, verified: Boolean(metadata.signature), playable: size > 0 && metadata.playable !== false, probe_status: response.status };
   } catch (error) {
-    const inferred = audioMetadataFromContentTypeAndPath('', url);
-    return {
-      ...inferred,
-      verified: false,
-      probe_error: error.message || 'audio probe failed'
-    };
+    return { codec: '', lossless: false, verified: false, probe_error: error.message || 'audio probe failed' };
+  } finally {
+    if (reader) await reader.cancel().catch(() => {});
+    clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -47,22 +44,35 @@ function audioMetadataFromBytes(bytes, contentType = '', url = '') {
   const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
   if (buffer.length >= 4) {
     const magic = buffer.toString('ascii', 0, 4);
-    if (magic === 'fLaC') return { codec: 'flac', contentType: 'audio/x-flac', lossless: true };
-    if (magic.startsWith('ID3') || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) {
-      return { codec: 'mp3', contentType: 'audio/mpeg', lossless: false };
+    if (magic === 'fLaC') return { codec: 'flac', contentType: 'audio/x-flac', lossless: true, signature: true };
+    if (buffer[0] === 0xff && (buffer[1] & 0xf6) === 0xf0) {
+      return { codec: 'aac', contentType: 'audio/aac', lossless: false, signature: true };
     }
-    if (magic.startsWith('OggS')) return { codec: 'ogg', contentType: 'audio/ogg', lossless: false };
+    if (magic.startsWith('ID3') || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) {
+      return { codec: 'mp3', contentType: 'audio/mpeg', lossless: false, signature: true };
+    }
+    if (magic.startsWith('OggS')) return { codec: 'ogg', contentType: 'audio/ogg', lossless: false, signature: true };
     if (magic.startsWith('RIFF') && buffer.length >= 12 && buffer.toString('ascii', 8, 12) === 'WAVE') {
-      return { codec: 'wav', contentType: 'audio/wav', lossless: true };
+      // WAVE is a container: only PCM / IEEE float fmt chunks prove lossless.
+      for (let offset = 12; offset + 8 <= buffer.length;) {
+        const length = buffer.readUInt32LE(offset + 4);
+        if (buffer.toString('ascii', offset, offset + 4) === 'fmt ' && length >= 16 && offset + 24 <= buffer.length) {
+          const format = buffer.readUInt16LE(offset + 8);
+          return { codec: 'wav', contentType: 'audio/wav', lossless: [1, 3].includes(format), signature: true };
+        }
+        offset += 8 + length + (length % 2);
+      }
+      return { codec: 'wav', contentType: 'audio/wav', lossless: false, signature: true };
     }
     if (buffer.length >= 8 && buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70) {
-      const ascii = buffer.toString('ascii').toLowerCase();
-      if (ascii.includes('alac')) return { codec: 'alac', contentType: 'audio/mp4', lossless: true };
-      return { codec: 'm4a', contentType: 'audio/mp4', lossless: false };
+      // An MP4 brand or an arbitrary 'alac' string does not prove the sample codec.
+      return { codec: 'm4a', contentType: 'audio/mp4', lossless: false, signature: true };
     }
   }
 
-  return audioMetadataFromContentTypeAndPath(contentType, url);
+  const prefix = buffer.toString('utf8', 0, 128).trimStart();
+  const invalid = /^(?:<|\{|\[)/.test(prefix) || /text\/html|application\/json/i.test(contentType || '');
+  return { ...audioMetadataFromContentTypeAndPath(contentType, url), lossless: false, signature: false, playable: !invalid };
 }
 
 /**
@@ -135,3 +145,4 @@ module.exports = {
   AUDIO_PROBE_BYTES,
   AUDIO_PROBE_TIMEOUT_MS
 };
+

@@ -16,6 +16,7 @@
         token: 'music_token',
         userId: 'music_user_id',
         volume: 'music_volume',
+        quality: 'music_quality',
         queue: 'music_queue'
     };
     const legacyStorage = {
@@ -54,6 +55,7 @@
         stallTimer: 0,
         qualityRetryLevel: 0,
         currentQuality: '999',
+        currentAudioMetadata: null,
         recentPlays: [],
         weeklyFavorites: [],
         historyLoading: false,
@@ -62,6 +64,8 @@
         progressDragging: false,
         progressDragInput: null,
         playRequestId: 0,
+        searchRequestId: 0,
+        recoveryRequestId: null,
         lastPlayableUrl: '',
         lastKnownPlaybackTime: 0,
         playbackIntent: false,
@@ -101,7 +105,7 @@
     const coverCache = new Map();
     const coverInflight = new Map();
     const AUDIO_URL_CACHE_MAX = 24;
-    const AUDIO_URL_CACHE_TTL_MS = 10 * 60 * 1000;
+    const AUDIO_URL_CACHE_TTL_MS = 45 * 1000;
     const USER_SYNC_LIMITS = {
         favorites: 10000,
         playlists: 300,
@@ -110,6 +114,7 @@
         queue: 500
     };
     const audioUrlCache = new Map();
+    const audioUrlInflight = new Map();
 
     function coverCacheSet(key, value) {
         if (coverCache.size >= COVER_CACHE_MAX) {
@@ -241,6 +246,7 @@
 
     function init() {
         refreshRuntimeState();
+        els.qualitySelect.value = normalizeRequestedQuality(readLocalValue(storage.quality) || '999');
         audio.volume = Number(readLocalValue(storage.volume, legacyStorage.volume) || 70) / 100;
         els.volume.value = String(Math.round(audio.volume * 100));
         bindEvents();
@@ -329,6 +335,7 @@
             localStorage.setItem(storage.volume, els.volume.value);
         });
         els.qualitySelect.addEventListener('change', () => {
+            try { localStorage.setItem(storage.quality, els.qualitySelect.value); } catch {}
             if (state.currentSong) showToast(`下一首将使用${qualityLabel(els.qualitySelect.value)}`);
         });
 
@@ -645,7 +652,7 @@
         if (view !== 'playlists') state.activePlaylistName = null;
         $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
         const titles = {
-            home: '为今晚找一首歌',
+            home: '发现音乐',
             search: '搜索音乐',
             favorites: '我的收藏',
             playlists: '我的歌单',
@@ -668,13 +675,16 @@
         els.viewRoot.innerHTML = `
             <div class="hero-strip">
                 <div class="feature-card">
-                    <h2>深色玻璃播放器，连接网易云与酷我音乐。</h2>
-                    <p>搜索、播放、收藏、歌单和歌词都保留在本地桌面体验里。当前播放器颜色会跟随封面自动变化。</p>
+                    <span class="eyebrow">MUSIC · 每日发现</span>
+                    <h2>把今天，<br>调到喜欢的频率。</h2>
+                    <p>从一首好歌开始，发现你的下一次心动。</p>
+                    <button class="primary-btn hero-play" id="discover-play-btn">▶ 播放榜单</button>
+                    <div class="hero-record" aria-hidden="true"><span>m</span></div>
                 </div>
                 <div class="stat-card">
-                    <span class="eyebrow">Library</span>
+                    <span class="eyebrow">我的音乐</span>
                     <strong>${state.queue.length}</strong>
-                    <span class="meta">队列中的歌曲</span>
+                    <span class="meta">首歌曲，随时继续</span><button class="text-btn" id="home-queue-btn">打开播放队列 →</button>
                 </div>
             </div>
             ${renderHomeHistory()}
@@ -705,6 +715,11 @@
         $$('[data-toplist]', els.viewRoot).forEach((button) => {
             button.addEventListener('click', () => loadToplist(button.dataset.toplist));
         });
+        $('#discover-play-btn')?.addEventListener('click', () => {
+            if (state.homeSongs.length) playSong(state.homeSongs[0], { list: state.homeSongs });
+            else { renderView('search'); els.searchInput.focus(); }
+        });
+        $('#home-queue-btn')?.addEventListener('click', () => els.queueOpen.click());
         $('#refresh-history-btn')?.addEventListener('click', () => loadUserHistory({ force: true }));
         bindSongActions(els.viewRoot);
         hydrateSongCardCovers(els.viewRoot);
@@ -1205,7 +1220,9 @@
     }
 
     async function searchSongs(keyword) {
+        const requestId = ++state.searchRequestId;
         if (!keyword) {
+            state.isLoading = false;
             renderView('search');
             return;
         }
@@ -1220,13 +1237,17 @@
                 count: 30
             };
             const data = await apiGet('api.php', params);
+            if (requestId !== state.searchRequestId) return;
             state.searchResults = normalizeSongList(Array.isArray(data) ? data : data.data || []);
         } catch (error) {
+            if (requestId !== state.searchRequestId) return;
             showToast(error.message || '搜索失败', 'error');
             state.searchResults = [];
         } finally {
-            state.isLoading = false;
-            renderView('search');
+            if (requestId === state.searchRequestId) {
+                state.isLoading = false;
+                if (state.view === 'search') renderView('search');
+            }
         }
     }
 
@@ -1301,6 +1322,7 @@
         }
         state.currentSong = normalizeSong(song);
         state.qualityRetryLevel = 0;
+        state.currentAudioMetadata = null;
         state.currentQuality = normalizeRequestedQuality(els.qualitySelect.value);
         state.lyrics = [];
         state.activeLyricIndex = -1;
@@ -1359,7 +1381,6 @@
                 genericMessage: '播放失败'
             });
             if (!isCurrentPlayRequest(playRequestId)) {
-                audio.pause();
                 return;
             }
             updateMediaSessionMetadata({ afterPlaybackStart: true });
@@ -1884,9 +1905,10 @@
             showToast('正在缓冲当前音乐源...');
             state.lastBufferingToastAt = now;
         }
-        clearTimeout(state.stallTimer);
+        if (state.stallTimer) return;
         const stallTimeout = musiqRuntime.isIOS && isCurrentOfflineLosslessStream() ? 16_000 : 6500;
         state.stallTimer = setTimeout(() => {
+            state.stallTimer = 0;
             recoverHighQualityStream();
         }, stallTimeout);
     }
@@ -1903,14 +1925,22 @@
     async function recoverHighQualityStream() {
         if (guardPlaybackForRuntime()) return;
         if (!state.currentSong || audio.paused) return;
-        const requested = normalizeRequestedQuality(state.currentQuality || els.qualitySelect.value);
-        const keepIosLosslessFirst = musiqRuntime.isIOS && isCurrentOfflineLosslessStream() && state.qualityRetryLevel === 0;
-        const retryQuality = requested === '999' && state.qualityRetryLevel === 0 && !keepIosLosslessFirst ? '320' : requested;
+        const playRequestId = state.playRequestId;
+        if (state.recoveryRequestId === playRequestId || navigator.onLine === false) return;
+        if (state.qualityRetryLevel >= 3) {
+            audio.pause();
+            setPlayerStatus('音源不稳定，请点按重试');
+            return;
+        }
+        state.recoveryRequestId = playRequestId;
+        const requested = normalizeRequestedQuality(els.qualitySelect.value);
+        const keepIosLosslessFirst = requested === '999' && state.qualityRetryLevel === 0;
+        const retryQuality = requested === '999' && state.qualityRetryLevel > 0 ? '320' : requested;
         state.qualityRetryLevel += 1;
         const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
         setPlayerStatus(keepIosLosslessFirst ? '正在恢复无损' : (retryQuality === '320' && requested === '999' ? '已切换 HQ' : '正在刷新音源'));
         showToast(keepIosLosslessFirst
-            ? '正在重新连接 iPhone 无损音频'
+            ? '正在重新获取无损音源'
             : (retryQuality === '320' && requested === '999'
             ? 'SQ 源不稳定，已切换到极高 HQ 继续播放'
             : '正在刷新高音质播放直链'));
@@ -1918,6 +1948,7 @@
         try {
             const data = await apiGet('api.php', {
                 types: 'url',
+                refresh: '1',
                 source: state.currentSong.source || 'netease',
                 id: state.currentSong.url_id || state.currentSong.id,
                 br: retryQuality,
@@ -1926,8 +1957,9 @@
                 album: state.currentSong.album || '',
                 duration: Number(state.currentSong.duration || 0)
             });
+            if (!isCurrentPlayRequest(playRequestId) || audio.paused) return;
             const url = data.url || data.data?.url;
-            if (!url) return;
+            if (!url) throw new Error('没有可用音源');
             if (Number(data.br || retryQuality) < 320) {
                 showToast('当前音乐源没有 HQ/SQ 音质，请换源或换版本', 'error');
                 return;
@@ -1939,6 +1971,7 @@
             audio.load();
             const expectedSrc = audio.src || url;
             audio.addEventListener('loadedmetadata', () => {
+                if (!isCurrentPlayRequest(playRequestId)) return;
                 if ((audio.currentSrc || audio.src || '') !== expectedSrc) return;
                 if (resumeAt > 0 && Number.isFinite(audio.duration)) {
                     audio.currentTime = Math.min(resumeAt, Math.max(0, audio.duration - 0.5));
@@ -1948,7 +1981,9 @@
                     .catch(() => showToast('高音质重试播放失败', 'error'));
             }, { once: true });
         } catch {
-            showToast('高音质重试失败，请手动切换到 HQ 或换源', 'error');
+            if (isCurrentPlayRequest(playRequestId)) showToast('重试失败，请点按播放或换源', 'error');
+        } finally {
+            if (state.recoveryRequestId === playRequestId) state.recoveryRequestId = null;
         }
     }
 
@@ -1956,15 +1991,24 @@
         const requested = normalizeRequestedQuality(quality);
         const cached = options.forceRefresh ? null : getCachedAudioUrl(song, requested);
         if (cached) return cached;
-        const data = await fetchPreferredAudioUrl(song, requested, options);
-        setCachedAudioUrl(song, requested, data);
-        return data;
+        const key = audioUrlCacheKey(song, requested) + (options.forceRefresh ? '|refresh' : '');
+        if (audioUrlInflight.has(key)) return audioUrlInflight.get(key);
+        const pending = fetchPreferredAudioUrl(song, requested, {
+            ...options, skipQualityStateUpdate: true
+        }).then((data) => {
+            const payload = data.data?.url ? data.data : data;
+            setCachedAudioUrl(song, requested, payload);
+            return payload;
+        });
+        audioUrlInflight.set(key, pending);
+        try { return await pending; }
+        finally { if (audioUrlInflight.get(key) === pending) audioUrlInflight.delete(key); }
     }
 
     async function fetchPreferredAudioUrl(song, quality, options = {}) {
         const requested = normalizeRequestedQuality(quality);
         try {
-            const data = await fetchAudioUrl(song, requested);
+            const data = await fetchAudioUrl(song, requested, options);
             if ((data.url || data.data?.url) && Number(data.br || requested) >= 320) return data;
         } catch (error) {
             if (requested !== '999') throw error;
@@ -1972,7 +2016,7 @@
 
         if (requested === '999') {
             if (!options.silentFallbackToast) showToast('SQ 源不可用，已切换到极高 HQ');
-            const data = await fetchAudioUrl(song, '320');
+            const data = await fetchAudioUrl(song, '320', options);
             if (Number(data.br || 0) < 320) throw new Error('当前音乐源没有 HQ/SQ 音质');
             if (!options.skipQualityStateUpdate) state.currentQuality = String(data.br || '320');
             return data;
@@ -1981,12 +2025,13 @@
         throw new Error('没有可用播放地址');
     }
 
-    function fetchAudioUrl(song, quality) {
+    function fetchAudioUrl(song, quality, options = {}) {
         return apiGet('api.php', {
             types: 'url',
             source: song.source || 'netease',
             id: song.url_id || song.id,
             br: quality,
+            ...(options.forceRefresh ? { refresh: '1' } : {}),
             name: song.name || '',
             artist: formatArtists(song.artist),
             album: song.album || '',
@@ -2036,7 +2081,7 @@
         clearTimeout(state.nextPrefetchTimer);
         const nextSong = predictedNextSong();
         if (!nextSong) return;
-        const quality = normalizeRequestedQuality(state.currentQuality || els.qualitySelect.value);
+        const quality = normalizeRequestedQuality(els.qualitySelect.value);
         state.nextPrefetchTimer = setTimeout(() => {
             getAudioUrlForPlayback(nextSong, quality, {
                 silentFallbackToast: true,
@@ -2865,11 +2910,14 @@
     function updateActiveLyric(current) {
         if (document.hidden && !audio.paused) return;
         if (!state.lyrics.length || !els.playerModal.classList.contains('open')) return;
-        let active = 0;
-        for (let i = 0; i < state.lyrics.length; i += 1) {
-            if (state.lyrics[i].time <= current) active = i;
-            else break;
+        let low = 0;
+        let high = state.lyrics.length;
+        while (low < high) {
+            const mid = (low + high) >>> 1;
+            if (state.lyrics[mid].time <= current) low = mid + 1;
+            else high = mid;
         }
+        const active = low - 1;
         if (active === state.activeLyricIndex) return;
         // Only toggle two elements instead of iterating all lines
         const prevLine = $(`.lyric-line[data-lyric-index="${state.activeLyricIndex}"]`, els.lyricBox);
@@ -2889,6 +2937,8 @@
     }
 
     function updateQualityBadge(data) {
+        if (data) state.currentAudioMetadata = data;
+        data = data || state.currentAudioMetadata;
         if (!els.expandedQuality) return;
         const quality = String(data?.br || state.currentQuality || els.qualitySelect.value || '999');
         const size = Number(data?.size || 0);
@@ -2912,18 +2962,19 @@
             || codec
             || typeof metadata.lossless === 'boolean'
         );
+        if (metadata?.verified_audio === false) return '音质未验证';
         if (hasVerifiedMetadata) {
-            if (metadata.lossless === true || (metadata.verified_audio && ['flac', 'wav', 'alac'].includes(codec))) {
+            if (metadata.verified_audio === true && metadata.lossless === true) {
                 return `无损 SQ${codec ? ` ${codec.toUpperCase()}` : ''}`;
             }
-            if (codec === 'mp3') return '极高 HQ MP3';
-            if (codec === 'm4a' || codec === 'aac') return '极高 HQ AAC';
+            if (codec === 'mp3') return numeric >= 320 ? '极高 HQ MP3' : 'MP3';
+            if (codec === 'm4a') return 'M4A';
+            if (codec === 'aac') return 'AAC';
             if (codec === 'ogg') return '高音质 OGG';
             if (metadata.lossless === false) return numeric >= 320 ? '极高 HQ' : '标准音质';
         }
 
-        if (numeric >= 900) return '无损 SQ';
-        if (numeric >= 800) return `无损 SQ ${numeric}K`;
+        if (numeric >= 800) return metadata ? '音质未验证' : '无损优先';
         if (numeric >= 320) return '极高 HQ';
         if (numeric >= 192) return '标准音质';
         return '省流音质';
@@ -2968,11 +3019,11 @@
 
     function setAccent(r, g, b) {
         const [nr, ng, nb] = boostColor(r, g, b);
-        root.style.setProperty('--accent-rgb', `${nr}, ${ng}, ${nb}`);
-        root.style.setProperty('--accent', `rgb(${nr}, ${ng}, ${nb})`);
+        root.style.setProperty('--accent-rgb', '230, 57, 70');
+        root.style.setProperty('--accent', '#e63946');
         root.style.setProperty('--cover-glow', `rgba(${nr}, ${ng}, ${nb}, 0.34)`);
         const luminance = (0.299 * nr + 0.587 * ng + 0.114 * nb) / 255;
-        root.style.setProperty('--accent-contrast', luminance > 0.62 ? '#07110d' : '#f5fff9');
+        root.style.setProperty('--accent-contrast', '#ffffff');
     }
 
     function boostColor(r, g, b) {
@@ -3514,18 +3565,26 @@
     }
 
     async function apiGetWithMeta(path, params = {}) {
-        const response = await fetch(buildApiUrl(path, params), {
-            credentials: runtimeConfig.credentials,
-            cache: 'no-store'
-        });
-        const data = await parseResponse(response);
-        return {
-            data,
-            headers: {
-                musicSource: response.headers.get('X-Music-Source') || '',
-                cache: response.headers.get('X-Cache') || response.headers.get('X-Toplist-Cache') || ''
-            }
-        };
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 45_000);
+        try {
+            const response = await fetch(buildApiUrl(path, params), {
+                credentials: runtimeConfig.credentials,
+                cache: 'no-store',
+                signal: controller.signal
+            });
+            const data = await parseResponse(response);
+            return {
+                data,
+                headers: {
+                    musicSource: response.headers.get('X-Music-Source') || '',
+                    cache: response.headers.get('X-Cache') || response.headers.get('X-Toplist-Cache') || ''
+                }
+            };
+        } catch (error) {
+            if (error.name === 'AbortError') throw new Error('请求超时，请检查网络后重试');
+            throw error;
+        } finally { clearTimeout(timeout); }
     }
 
     async function apiPost(path, body = {}) {
@@ -3830,3 +3889,4 @@
         }
     }
 })();
+

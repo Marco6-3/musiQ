@@ -8,7 +8,7 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dev": "electron .",
+    "dev": "node scripts/dev.js",
     "server": "node src/server/index.js",
     "web:start": "node src/server/index.js",
     "serve:web": "node src/server/index.js",
@@ -25,7 +25,8 @@
     "pack": "electron-builder --dir",
     "dist": "electron-builder --dir",
     "build": "electron-builder --dir",
-    "installer": "electron-builder"
+    "installer": "electron-builder",
+    "preview:ui": "node scripts/preview-ui.mjs"
   },
   "build": {
     "appId": "com.music.music",
@@ -77,6 +78,7 @@
   },
   "devDependencies": {
     "electron": "^38.5.1",
-    "electron-builder": "^26.0.12"
+    "electron-builder": "^26.0.12",
+    "vite": "^8.2.2"
   }
 }
